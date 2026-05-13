@@ -17,21 +17,23 @@ jobs:
         with:
           persist-credentials: true
 
-      # Libraries တွေကို သိမ်းထားရန် (ဒါက အချိန်အများကြီး သက်သာစေပါမယ်)
+      # Permission error မတက်အောင် folder ကို user ဝင်လို့ရတဲ့နေရာ ပြောင်းသိမ်းပါမယ်
       - name: Cache System Dependencies
         uses: actions/cache@v3
         with:
-          path: /var/cache/apt/archives
+          path: ~/apt-cache
           key: ${{ runner.os }}-apt-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-apt-
 
       - name: Install System Dependencies
         run: |
-          sudo rm -rf /var/lib/apt/lists/*
+          mkdir -p ~/apt-cache
           sudo apt-get update -qq
-          # မရှိမဖြစ်လိုအပ်တာတွေကိုပဲ သွင်းပြီး ကျန်တာကို skip လုပ်ခိုင်းထားပါတယ်
-          sudo apt-get install -y -qq --no-install-recommends build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev ffmpeg
+          # Cache folder ကို အသစ်သတ်မှတ်ပေးပြီး install လုပ်ခြင်း
+          sudo apt-get install -y -qq -o dir::cache::archives="$HOME/apt-cache" --no-install-recommends build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev ffmpeg
+          # သိမ်းမယ့် folder ကို runner user ပိုင်ဆိုင်ကြောင်း သတ်မှတ်ပေးခြင်း (Permission Fix)
+          sudo chown -R $USER:$USER ~/apt-cache
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -42,7 +44,6 @@ jobs:
       - name: Install Node Dependencies
         run: |
           npm install
-          # Canvas error ကို ပြင်ရန်အတွက် အောက်ပါ line ကို သုံးရပါမယ်
           npm rebuild canvas --update-binary
 
       - name: Run Workflow
