@@ -45,7 +45,7 @@ function saveLastUpdateId(id) {
 
 async function generateAiContent(songTitle) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const model = genAI.getGenerativeModel({ model: "gemini-1.0-pro" });
         const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. Provide the output in JSON format with three keys: "youtubeTitle" (an engaging, SEO-friendly title), "inspirationalQuote" (a short, powerful quote, max 150 chars), and "imageKeywords" (a string of 3-4 keywords for Pexels, e.g., "serene forest, calm ocean").
 
 Example:
@@ -256,8 +256,10 @@ async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
             const endZoom = isZoomIn ? 1.15 : 1.0;
             const xPan = ['iw/2-(iw/zoom/2)', '0', 'iw-iw/zoom'][Math.floor(Math.random() * 3)];
             const yPan = ['ih/2-(ih/zoom/2)', '0', 'ih-ih/zoom'][Math.floor(Math.random() * 3)];
+            const preScale = 1.2;
             
-            return `[${i}:v]scale=${width}*1.2:-1,crop=${width}:${height},` +
+            return `[${i}:v]scale=w=${width}*${preScale}:h=${height}*${preScale}:force_original_aspect_ratio=increase,` +
+                   `crop=w=${width}*${preScale}:h=${height}*${preScale},` +
                    `zoompan=z='on*(${endZoom}-${startZoom})/(${imgDuration * finalFps})+${startZoom}':` +
                    `x='${xPan}':y='${yPan}':d=${Math.ceil(imgDuration * finalFps)}:` +
                    `s=${width}x${height}:fps=${finalFps},setsar=1[v${i}]`;
@@ -268,7 +270,10 @@ async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
         
         let textFilter = '';
         if (quote) {
-            const fontPath = 'C\\\\:/Windows/Fonts/Arial.ttf'; // Windows path requires escaping the colon for ffmpeg
+            // Platform-dependent font path for FFmpeg
+            const fontPath = process.platform === 'win32' 
+                ? 'C\\\\:/Windows/Fonts/Arial.ttf' 
+                : '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
             const escapedQuote = quote.replace(/'/g, `\\\\\\'`).replace(/:/g, `\\\\:`);
             textFilter = `[v_no_text]drawtext=fontfile='${fontPath}':text='${escapedQuote}':fontsize=42:fontcolor=white:x=(w-text_w)/2:y=h-text_h-80:box=1:boxcolor=black@0.4:boxborderw=15[v_with_text]`;
         }
