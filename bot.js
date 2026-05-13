@@ -84,20 +84,22 @@ async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
 }
 
 // ၁ နာရီစာ Loop ပတ်ခြင်း (Randomized)
-async function loopToOneHour(baseVideoPath, audioDuration, finalName) {
-    const outPath = path.join(__dirname, 'output', `${finalName}_long.mp4`);
-    const loopCount = Math.ceil(3600 / (imagePaths.length * 10)); // ၁ နာရီပြည့်အောင် တွက်ချက်သည်
-    const targetDuration = 3600 + Math.floor(Math.random() * 180);
+(async () => {
+    if (process.env.RUN_WORKFLOW === 'true') {
+        console.log("🚀 Workflow mode detected. Starting processQueue...");
+        await processQueue();
+        console.log("✅ processQueue finished. Exiting...");
+        process.exit(0); // အလုပ်ပြီးရင် ပိတ်ခိုင်းလိုက်တာပါ (ဒါမှ GitHub Action ပြီးမှာပါ)
+    } else {
+        console.log("🤖 Bot mode detected. Launching Telegram listener...");
+        bot.on('audio', async (ctx) => {
+            ctx.reply("📥 သီချင်းကို လက်ခံရရှိပါတယ်။ GitHub Action အချိန်ကျရင် အလိုအလျောက် သိမ်းဆည်းသွားပါလိမ့်မယ်။");
+        });
+        bot.launch();
+    }
+})();
 
-    return new Promise((resolve, reject) => {
-        ffmpeg(baseVideoPath)
-            .inputOptions([`-stream_loop ${loopCount}`])
-            .outputOptions(['-c copy', `-t ${targetDuration}`])
-            .on('end', () => resolve(outPath))
-            .on('error', reject)
-            .save(outPath);
-    });
-}
+
 
 // YouTube Upload & Process Queue (ယခင်အတိုင်း)
 // ... (uploadVideo, createCanvasThumb, processQueue များအား အထက်ပါ function သစ်များဖြင့် ညှိနှိုင်းသုံးစွဲရန်)
