@@ -172,15 +172,37 @@ async function processQueue() {
 
 // --- START LOGIC ---
 
-(async () => {
-    if (process.env.RUN_WORKFLOW === 'true') {
-        console.log("🚀 Starting processQueue...");
-        await processQueue();
-        console.log("✅ All tasks completed.");
-        process.exit(0);
-    } else {
-        console.log("🤖 Listener mode active.");
-        bot.on('audio', (ctx) => ctx.reply("📥 Received! GitHub will process this later."));
-        bot.launch();
-    }
-})();
+async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
+    const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
+    const size = isShorts ? '1080x1920' : '1920x1080';
+    const scaleSize = isShorts ? '1080:1920' : '1920:1080';
+    
+    return new Promise((resolve, reject) => {
+        let ff = ffmpeg();
+        imagePaths.forEach(img => ff.input(img).inputOptions(['-loop 1', '-t 12']));
+        ff.input(audioPath);
+
+        // Filter expression ကို ပိုမိုရှင်းလင်းအောင် ပြင်ထားပါတယ်
+        let filter = imagePaths.map((_, i) => 
+            `[${i}:v]scale=${scaleSize}:force_original_aspect_ratio=increase,crop=${scaleSize},zoompan=z='min(zoom+0.001,1.2)':d=300:s=${size}[v${i}]`
+        ).join(';');
+        
+        filter += ';' + imagePaths.map((_, i) => `[v${i}]`).join('') + `concat=n=${imagePaths.length}:v=1:a=0[outv]`;
+
+        ff.complexFilter([filter])
+          .outputOptions([
+              '-map [outv]', 
+              `-map ${imagePaths.length}:a`, 
+              '-pix_fmt yuv420p', 
+              '-c:v libx264', 
+              '-preset ultrafast', // GitHub Actions မြန်စေရန်
+              '-shortest'
+          ])
+          .on('end', () => resolve(outPath))
+          .on('error', (err) => {
+              console.error("FFmpeg Details:", err.message);
+              reject(err);
+          })
+          .save(outPath);
+    });
+}
