@@ -6,9 +6,11 @@ const ffmpeg = require('fluent-ffmpeg');
 const { google } = require('googleapis');
 const axios = require('axios');
 const { createCanvas, loadImage } = require('canvas');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const ADMIN_ID = process.env.ADMIN_ID || '2035091217';
 const bot = new Telegraf(process.env.BOT_TOKEN);
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const dirs = ['songs', 'images', 'output', 'assets', 'temp'];
 dirs.forEach(dir => fs.ensureDirSync(path.join(__dirname, dir)));
@@ -41,19 +43,40 @@ function saveLastUpdateId(id) {
     fs.writeFileSync(LAST_UPDATE_ID_LOG, id.toString());
 }
 
-// quotable.io API မှ ကျပန်း English quote ကို ခေါ်ယူသည်
-async function fetchRandomQuote() {
+async function generateAiContent(songTitle) {
     try {
-        const response = await axios.get('https://api.quotable.io/random?maxLength=150');
-        if (response.data && response.data.content) {
-            return `"${response.data.content}" - ${response.data.author}`;
-        }
-        return null;
+        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. Provide the output in JSON format with three keys: "youtubeTitle" (an engaging, SEO-friendly title), "inspirationalQuote" (a short, powerful quote, max 150 chars), and "imageKeywords" (a string of 3-4 keywords for Pexels, e.g., "serene forest, calm ocean").
+
+Example:
+{
+  "youtubeTitle": "Find Your Inner Peace | 1-Hour Meditation Journey",
+  "inspirationalQuote": "The quieter you become, the more you can hear.",
+  "imageKeywords": "serene forest, calm ocean, misty mountains"
+}`;
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+        
+        // Extract JSON from the response
+        const jsonString = text.match(/```json\n([\s\S]*?)\n```/)[1];
+        const content = JSON.parse(jsonString);
+        
+        console.log("Gemini AI Content Generated:", content);
+        return content;
+
     } catch (error) {
-        console.error("Failed to fetch quote:", error.message);
-        return null; // Error ဖြစ်ပါက video render မပျက်အောင် null ပြန်ပေးသည်
+        console.error("Error generating content with Gemini AI:", error);
+        // Fallback to a simple title if AI fails
+        return {
+            youtubeTitle: songTitle,
+            inspirationalQuote: "Breathe in, breathe out.",
+            imageKeywords: "nature meditation"
+        };
     }
 }
+
 
 // --- MAIN FUNCTIONS ---
 
@@ -127,25 +150,41 @@ async function getAudioDuration(filePath) {
     });
 }
 
-async function getMultipleImages(query) {
+async function searchAndDownloadImages(query) {
     try {
         const randomPage = Math.floor(Math.random() * 20) + 1;
         const res = await axios.get(
-            `https://api.pexels.com/v1/search?query=${query}&per_page=5&page=${randomPage}`,
+            `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=landscape&per_page=5&page=${randomPage}`,
             { headers: { 'Authorization': process.env.PEXELS_KEY } }
         );
-        const urls = res.data.photos.map(p => p.src.large2x);
-        const paths = [];
-        for (let i = 0; i < urls.length; i++) {
-            const p = path.join(__dirname, 'images', `bg_${i}.jpg`);
-            const writer = fs.createWriteStream(p);
-            const response = await axios({ url: urls[i], responseType: 'stream' });
-            response.data.pipe(writer);
-            await new Promise(r => writer.on('finish', r));
-            paths.push(p);
+
+        if (!res.data.photos || res.data.photos.length === 0) {
+            console.warn(`No images found for query: "${query}". Falling back to "nature".`);
+            return searchAndDownloadImages("nature");
         }
+
+        const urls = res.data.photos.map(p => p.src.large2x);
+        const downloadPromises = urls.map((url, i) => {
+            const imagePath = path.join(__dirname, 'images', `bg_${i}.jpg`);
+            return (async () => {
+                const writer = fs.createWriteStream(imagePath);
+                const response = await axios({ url, responseType: 'stream' });
+                response.data.pipe(writer);
+                await new Promise((resolve, reject) => {
+                    writer.on('finish', resolve);
+                    writer.on('error', reject);
+                });
+                return imagePath;
+            })();
+        });
+        
+        const paths = await Promise.all(downloadPromises);
+        console.log(`Successfully downloaded ${paths.length} images for query "${query}".`);
         return paths;
-    } catch (e) { return []; }
+    } catch (e) {
+        console.error("Error fetching from Pexels:", e.message);
+        return [];
+    }
 }
 
 // ✅ Fix: YouTube အတွက် description, tags, comment တို့ကို အလိုအလျောက် ဖန်တီးပေးသည်
@@ -180,96 +219,64 @@ Whether you're looking to meditate, focus on work, study, or simply unwind after
         ...keywords.map(k => k.toLowerCase())
     ];
 
-    const pinComment = `Thank you for listening! We hope this music helps you find a moment of peace and tranquility in your day. 
-What did you feel while listening to "${cleanTitle}"? Let us know in the replies! 👇`.trim();
+    const pinComment = `Thank you for listening! We hope this music helps you find a moment of peace and tranquility in your day. \nWhat did you feel while listening to \"${cleanTitle}\"? Let us know in the replies! 👇`.trim();
 
-    return { description, tags, pinComment };
+    return { description, tags };
 }
 
-async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
-    const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
-    const width  = isShorts ? 1080 : 1920;
+async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
+    const outPath = path.join(__dirname, 'temp', `render_${isShorts ? 's' : 'l'}.mp4`);
+    const width = isShorts ? 1080 : 1920;
     const height = isShorts ? 1920 : 1080;
+
+    let duration = await getAudioDuration(audioPath);
+    if (isShorts && duration > 63) {
+        duration = 63; // Shorts ကို စက္ကန့် 60 သတ်မှတ်
+    }
     
-    const duration = await getAudioDuration(audioPath);
     const n = imagePaths.length;
     if (n === 0) return Promise.reject(new Error("No images provided for slideshow."));
     const imgDuration = duration / n;
 
-    // API မှ Quotes များကို ခေါ်ယူရန် ပြင်ဆင်ခြင်း
-    const quoteInterval = 20; // စာသားတစ်ခုပြသမည့်အချိန် (စက္ကန့်)
-    const numQuotesToFetch = Math.floor(duration / quoteInterval);
-    let quotes = [];
-
-    if (numQuotesToFetch > 0 && !isShorts) {
-        console.log(`Fetching ${numQuotesToFetch} random English quotes...`);
-        const quotePromises = Array(numQuotesToFetch).fill(null).map(() => fetchRandomQuote());
-        const fetchedQuotes = await Promise.all(quotePromises);
-        quotes = fetchedQuotes.filter(Boolean); // null များဖယ်ထုတ်ခြင်း
-        console.log(`Successfully fetched ${quotes.length} quotes.`);
-    }
-
     return new Promise((resolve, reject) => {
         let ff = ffmpeg();
 
-        imagePaths.forEach(img => {
-            ff.input(img);
-        });
+        imagePaths.forEach(img => ff.input(img));
+        
         ff.input(audioPath);
+        if (isShorts) {
+            ff.inputOptions([`-t ${duration}`]); // audio duration ကိုကန့်သတ်
+        }
 
         const finalFps = 25;
 
-        // Ken Burns Effect Filters
         const effectFilters = imagePaths.map((_, i) => {
             const isZoomIn = Math.random() < 0.5;
             const startZoom = isZoomIn ? 1.0 : 1.15;
             const endZoom = isZoomIn ? 1.15 : 1.0;
             const xPan = ['iw/2-(iw/zoom/2)', '0', 'iw-iw/zoom'][Math.floor(Math.random() * 3)];
             const yPan = ['ih/2-(ih/zoom/2)', '0', 'ih-ih/zoom'][Math.floor(Math.random() * 3)];
-            const preScale = 1.2;
-
-            return `[${i}:v]scale=${width * preScale}:${height * preScale}:force_original_aspect_ratio=increase,` +
-                   `crop=${width * preScale}:${height * preScale},` +
+            
+            return `[${i}:v]scale=${width}*1.2:-1,crop=${width}:${height},` +
                    `zoompan=z='on*(${endZoom}-${startZoom})/(${imgDuration * finalFps})+${startZoom}':` +
                    `x='${xPan}':y='${yPan}':d=${Math.ceil(imgDuration * finalFps)}:` +
-                   `s=${width}x${height}:fps=${finalFps},setsar=1,format=yuv420p[v${i}]`;
+                   `s=${width}x${height}:fps=${finalFps},setsar=1[v${i}]`;
         });
         
-        const concatInput  = imagePaths.map((_, i) => `[v${i}]`).join('');
+        const concatInput = imagePaths.map((_, i) => `[v${i}]`).join('');
         const concatFilter = `${concatInput}concat=n=${n}:v=1:a=0[v_no_text]`;
         
-        // DrawText (Quotes) Filters
-        let textFilters = [];
-        let lastVideoOutput = '[v_no_text]';
-        if (quotes.length > 0) {
-            // Windows OS အတွက် default font ကိုအသုံးပြုခြင်း
+        let textFilter = '';
+        if (quote) {
             const fontPath = 'C:/Windows/Fonts/Arial.ttf';
-            
-            for (let i = 0; i < quotes.length; i++) {
-                const quote = quotes[i].replace(/'/g, `\\\\\\'`); // Escape single quotes
-                const startTime = i * quoteInterval;
-                const endTime = startTime + quoteInterval;
-                const newVideoOutput = `[v_text_${i}]`;
-                
-                textFilters.push(
-                    `${lastVideoOutput}drawtext=` +
-                    `fontfile='${fontPath}':` +
-                    `text='${quote}':` +
-                    `fontsize=42:` +
-                    `fontcolor=white:` +
-                    `x=(w-text_w)/2:` +
-                    `y=h-text_h-80:` +
-                    `box=1:boxcolor=black@0.4:boxborderw=15:` +
-                    `enable='between(t,${startTime},${endTime})'` +
-                    `${newVideoOutput}`
-                );
-                lastVideoOutput = newVideoOutput;
-            }
+            const escapedQuote = quote.replace(/'/g, `\\\\\\'`).replace(/:/g, `\\\\:`);
+            textFilter = `[v_no_text]drawtext=fontfile='${fontPath}':text='${escapedQuote}':fontsize=42:fontcolor=white:x=(w-text_w)/2:y=h-text_h-80:box=1:boxcolor=black@0.4:boxborderw=15[v_with_text]`;
         }
 
         const allImageFilters = [...effectFilters, concatFilter];
-        const combinedFilters = textFilters.length > 0 ? [...allImageFilters, ...textFilters] : allImageFilters;
-        const finalVideoMap = textFilters.length > 0 ? lastVideoOutput : '[v_no_text]';
+        if (textFilter) allImageFilters.push(textFilter);
+
+        const finalVideoMap = textFilter ? '[v_with_text]' : '[v_no_text]';
 
         let filterComplex;
         let outputMaps;
@@ -277,12 +284,12 @@ async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
         if (!isShorts) {
             const fadeDuration = 1;
             const fadeStartTime = duration > fadeDuration ? duration - fadeDuration : 0;
-            const audioFilter = `[${imagePaths.length}:a]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
-            filterComplex = [...combinedFilters, audioFilter].join(';');
+            const audioFilter = `[${n}:a]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
+            filterComplex = [...allImageFilters, audioFilter].join(';');
             outputMaps = [`-map ${finalVideoMap}`, '-map [outa]'];
         } else {
-            filterComplex = combinedFilters.join(';');
-            outputMaps = [`-map ${finalVideoMap}`, `-map ${imagePaths.length}:a`];
+            filterComplex = allImageFilters.join(';');
+            outputMaps = [`-map ${finalVideoMap}`, `-map ${n}:a`];
         }
 
         ff.complexFilter(filterComplex)
@@ -294,10 +301,9 @@ async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
               '-pix_fmt yuv420p',
               '-c:a aac',
               '-b:a 192k',
-              '-shortest',
-              '-avoid_negative_ts make_zero'
+              '-shortest'
           ])
-          .on('start', cmd => console.log('FFmpeg Render Start with API Quotes'))
+          .on('start', cmd => console.log('FFmpeg Render Start with AI Content'))
           .on('end', () => resolve(outPath))
           .on('error', (err) => reject(err))
           .save(outPath);
@@ -351,30 +357,6 @@ async function uploadVideo(filePath, thumbPath, title, description, tags, isShor
     return res.data;
 }
 
-// ✅ Fix: Video တင်ပြီးနောက် comment ရေးသားပြီး pin ရန်ကြိုးစားသည်
-async function postAndPinComment(videoId, commentText) {
-    try {
-        const commentRes = await youtube.commentThreads.insert({
-            part: 'snippet',
-            requestBody: {
-                snippet: {
-                    videoId: videoId,
-                    topLevelComment: {
-                        snippet: {
-                            textOriginal: commentText
-                        }
-                    }
-                }
-            }
-        });
-        const commentId = commentRes.data.snippet.topLevelComment.id;
-        console.log(`Comment posted: ${commentId}. Pinning manually is required.`);
-        await bot.telegram.sendMessage(ADMIN_ID, `Comment posted for https://youtu.be/${videoId}. Please pin it manually.`);
-    } catch (err) {
-        console.error('Error posting comment:', err.message);
-        await bot.telegram.sendMessage(ADMIN_ID, `❌ Error posting comment: ${err.message}`);
-    }
-}
 
 async function createCanvasThumb(imagePath, title) {
     const canvas = createCanvas(1280, 720);
@@ -398,39 +380,55 @@ async function processQueue() {
 
     const currentSong = songs[0];
     const audioPath = path.join(__dirname, 'songs', currentSong);
-    const title = currentSong.replace('.mp3', '').replace(/--/g, '—');
+    const originalTitle = currentSong.replace('.mp3', '').replace(/--/g, '—');
 
     try {
-        const { description, tags, pinComment } = generateContent(title);
-        const imagePaths = await getMultipleImages('nature meditation');
-        if (imagePaths.length === 0) throw new Error("No images fetched");
+        // 1. AI content generate လုပ်ခြင်း
+        const { youtubeTitle, inspirationalQuote, imageKeywords } = await generateAiContent(originalTitle);
+
+        // 2. AI keywords ဖြင့် image များ ရှာဖွေ ဒေါင်းလုဒ်လုပ်ခြင်း
+        const imagePaths = await searchAndDownloadImages(imageKeywords);
+        if (imagePaths.length === 0) throw new Error("No images downloaded from Pexels.");
+
+        const { description, tags } = generateContent(youtubeTitle);
 
         // --- Long Video ---
-        const thumbPath = await createCanvasThumb(imagePaths[0], title);
-        const baseLong = await renderSlideshow(audioPath, imagePaths, false);
-        const finalLong = await loopToOneHour(baseLong, title);
-        const longVideoData = await uploadVideo(finalLong, thumbPath, title, description, tags, false);
+        console.log("--- Starting Long Video Process ---");
+        const thumbPath = await createCanvasThumb(imagePaths[0], youtubeTitle);
+        const baseLong = await renderSlideshow(audioPath, imagePaths, inspirationalQuote, false);
+        const finalLong = await loopToOneHour(baseLong, youtubeTitle);
+        const longVideoData = await uploadVideo(finalLong, thumbPath, youtubeTitle, description, tags, false);
         const longUrl = `https://youtu.be/${longVideoData.id}`;
-        await postAndPinComment(longVideoData.id, pinComment);
 
         // --- Shorts Video ---
-        const shortsDesc = `Enjoy a short moment of peace with "${title}". #shorts #meditation #relaxingmusic`;
+        console.log("--- Starting Shorts Video Process ---");
+        const shortsDesc = `Enjoy a short moment of peace with "${youtubeTitle}". #shorts #meditation #relaxingmusic`;
         const shortsTags = ['shorts', 'meditation', 'relaxing music', ...tags.slice(0, 5)];
-        const finalShorts = await renderSlideshow(audioPath, [imagePaths[0]], true);
-        const shortsVideoData = await uploadVideo(finalShorts, null, title, shortsDesc, shortsTags, true);
+        // Shorts အတွက် ပုံတစ်ပုံနှင့် quote ကိုသုံးပါ
+        const finalShorts = await renderSlideshow(audioPath, [imagePaths[0]], inspirationalQuote, true);
+        const shortsVideoData = await uploadVideo(finalShorts, null, youtubeTitle, shortsDesc, shortsTags, true);
         const shortsUrl = `https://youtu.be/${shortsVideoData.id}`;
 
         await bot.telegram.sendMessage(ADMIN_ID,
             `✅ Uploaded!\n🎬 Long: ${longUrl}\n📱 Shorts: ${shortsUrl}`
         );
 
+        // Cleanup and move processed song
         fs.emptyDirSync('./temp');
         fs.emptyDirSync('./images');
-        fs.emptyDirSync('./output');
-        fs.removeSync(audioPath);
+        // fs.emptyDirSync('./output'); // Keep output for inspection if needed
+        const processedDir = path.join(__dirname, 'songs', 'processed');
+        fs.ensureDirSync(processedDir);
+        fs.moveSync(audioPath, path.join(processedDir, currentSong), { overwrite: true });
+        console.log(`Moved ${currentSong} to processed folder.`);
+
     } catch (err) {
         console.error("Queue Error:", err);
-        await bot.telegram.sendMessage(ADMIN_ID, `❌ Error: ${err.message}`);
+        await bot.telegram.sendMessage(ADMIN_ID, `❌ Error processing ${originalTitle}: ${err.message}`);
+        // Move the problematic song to avoid retrying it indefinitely
+        const processedDir = path.join(__dirname, 'songs', 'processed', 'error');
+        fs.ensureDirSync(processedDir);
+        fs.moveSync(audioPath, path.join(processedDir, currentSong), { overwrite: true });
     }
 }
 
@@ -438,9 +436,9 @@ async function processQueue() {
 (async () => {
     try {
         await processQueue();
-        process.exit(0);
+        // process.exit(0); // Keep the process running for potential future tasks or make it a cron job
     } catch (e) {
-        console.error(e);
-        process.exit(1);
+        console.error("Fatal Error:", e);
+        // process.exit(1);
     }
 })();
