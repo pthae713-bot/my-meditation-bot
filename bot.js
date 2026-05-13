@@ -10,7 +10,6 @@ const { createCanvas, loadImage } = require('canvas');
 const ADMIN_ID = process.env.ADMIN_ID || '2035091217';
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Folder Setup
 const dirs = ['songs', 'images', 'output', 'assets', 'temp'];
 dirs.forEach(dir => fs.ensureDirSync(path.join(__dirname, dir)));
 
@@ -20,78 +19,69 @@ const oauth2Client = new google.auth.OAuth2(credentials.installed.client_id, cre
 oauth2Client.setCredentials(token);
 const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
 
-/**
- * ၁။ Rendering ကို သီချင်းအရှည်အတိုင်းပဲ အရင်လုပ်မည် (အမြန်ဆုံးနည်းလမ်း)
- */
-async function renderShortBase(audioPath, imagePath, outputName, isShorts = false) {
-    const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
-    const size = isShorts ? '1080x1920' : '1920x1080';
-
+// ၁။ သီချင်းအရှည်ကို စက္ကန့်ဖြင့် တိုင်းတာရန်
+async function getAudioDuration(filePath) {
     return new Promise((resolve, reject) => {
-        let ff = ffmpeg().input(imagePath).inputOptions(['-loop 1']).input(audioPath);
-        
-        // Ken Burns Effect (Smooth Zoom)
-        let filter = `[0:v]zoompan=z='min(zoom+0.001,1.3)':d=1:x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2',scale=${size.replace('x', ':')}:force_original_aspect_ratio=increase,crop=${size.replace('x', ':')}[bg]`;
-
-        ff.complexFilter([filter])
-          .outputOptions(['-map [bg]', '-map 1:a', '-pix_fmt yuv420p', '-shortest'])
-          .on('end', () => resolve(outPath))
-          .on('error', reject)
-          .save(outPath);
+        ffmpeg.ffprobe(filePath, (err, metadata) => {
+            if (err) reject(err);
+            resolve(metadata.format.duration);
+        });
     });
 }
 
-/**
- * ၂။ Base Video ကို ၁ နာရီစာဖြစ်အောင် Loop လုပ်မည် (Rendering မဟုတ်ဘဲ Copy လုပ်ခြင်းဖြစ်၍ အလွန်မြန်သည်)
- */
-async function loopToHour(baseVideoPath, finalName) {
-    const outPath = path.join(__dirname, 'output', `${finalName}_long.mp4`);
+// ၂။ Base Video လုပ်ခြင်း (Zoom Effect ပါဝင်သည်)
+async function renderBase(audioPath, imagePath, isShorts = false) {
+    const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
+    const size = isShorts ? '1080x1920' : '1920x1080';
+    const duration = isShorts ? 58 : null; // Shorts ဆိုလျှင် ၅၈ စက္ကန့်ပဲ ဖြတ်မည်
+
     return new Promise((resolve, reject) => {
-        // ၁ နာရီစာရအောင် loop ပတ်မည် (၅ မိနစ်သီချင်းဆိုလျှင် ၁၂ ခါ loop ပတ်မည်)
+        let ff = ffmpeg().input(imagePath).inputOptions(['-loop 1']).input(audioPath);
+        let filter = `[0:v]zoompan=z='min(zoom+0.001,1.3)':d=1:x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2',scale=${size.replace('x', ':')}:force_original_aspect_ratio=increase,crop=${size.replace('x', ':')}[bg]`;
+        
+        let command = ff.complexFilter([filter]).outputOptions(['-map [bg]', '-map 1:a', '-pix_fmt yuv420p', '-shortest']);
+        if (duration) command.setDuration(duration);
+        
+        command.on('end', () => resolve(outPath)).on('error', reject).save(outPath);
+    });
+}
+
+// ၃။ ၁ နာရီကျော်အောင် Loop ပတ်ခြင်း (Random စက္ကန့်အနည်းငယ်စီ ကွာအောင်လုပ်မည်)
+async function loopToOneHour(baseVideoPath, audioDuration, finalName) {
+    const outPath = path.join(__dirname, 'output', `${finalName}_long.mp4`);
+    // ၁ နာရီ (၃၆၀၀ စက္ကန့်) ပြည့်ရန် လိုအပ်သော Loop အကြိမ်ရေကို တွက်သည်
+    const loopCount = Math.ceil(3600 / audioDuration);
+    // Random စက္ကန့် (၁ မိနစ် မှ ၃ မိနစ်ကြား) ထပ်ပေါင်းမည်
+    const randomExtraTime = Math.floor(Math.random() * 120) + 60; 
+    const targetDuration = 3600 + randomExtraTime;
+
+    return new Promise((resolve, reject) => {
         ffmpeg(baseVideoPath)
-            .inputOptions(['-stream_loop 12']) // ၁၂ ခါဆိုလျှင် ၁ နာရီဝန်းကျင်ရသည်
-            .outputOptions(['-c copy', '-t 01:00:00']) // Rendering မလုပ်ဘဲ copy ပဲလုပ်သဖြင့် ခဏချင်းပြီးသည်
+            .inputOptions([`-stream_loop ${loopCount}`])
+            .outputOptions(['-c copy', `-t ${targetDuration}`])
             .on('end', () => resolve(outPath))
             .on('error', reject)
             .save(outPath);
     });
 }
 
-// ပုံဒေါင်းခြင်းနှင့် အခြား function များ (အရင် Version အတိုင်း)
-async function getRandomImages(query) {
-    try {
-        const res = await axios.get(`https://api.pexels.com/v1/search?query=${query}&per_page=1`, {
-            headers: { 'Authorization': process.env.PEXELS_KEY }
-        });
-        return res.data.photos[0].src.large2x;
-    } catch (e) { return 'https://images.pexels.com/photos/1051838/pexels-photo-1051838.jpeg'; }
-}
-
-async function createThumbnail(imagePath, title) {
-    const canvas = createCanvas(1280, 720);
-    const ctx = canvas.getContext('2d');
-    const img = await loadImage(imagePath);
-    ctx.drawImage(img, 0, 0, 1280, 720);
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.fillRect(0, 500, 1280, 220);
-    ctx.fillStyle = 'white';
-    ctx.font = 'bold 60px Arial';
-    ctx.fillText(title.toUpperCase(), 50, 600);
-    const outPath = path.join(__dirname, 'output', 'thumb.jpg');
-    fs.writeFileSync(outPath, canvas.toBuffer('image/jpeg'));
-    return outPath;
-}
-
-async function uploadToYouTube(filePath, thumbPath, title) {
+// ၄။ YouTube တင်ခြင်း (Shorts ပါ တင်နိုင်ရန် logic)
+async function uploadVideo(filePath, thumbPath, title, isShorts = false) {
     const res = await youtube.videos.insert({
         part: 'snippet,status',
         requestBody: {
-            snippet: { title: `${title} | Relaxing Meditation Music`, description: `#meditation #sleep`, categoryId: '10' },
+            snippet: { 
+                title: isShorts ? `${title} #shorts #meditation` : `${title} | Relaxing Sleep Music`, 
+                description: isShorts ? `Relax in seconds. #shorts` : `Full 1-hour deep meditation session. #meditation #sleep`, 
+                categoryId: '10' 
+            },
             status: { privacyStatus: 'public' }
         },
         media: { body: fs.createReadStream(filePath) }
     });
-    await youtube.thumbnails.set({ videoId: res.data.id, media: { body: fs.createReadStream(thumbPath) } });
+    if (!isShorts) {
+        await youtube.thumbnails.set({ videoId: res.data.id, media: { body: fs.createReadStream(thumbPath) } });
+    }
     return `https://youtu.be/${res.data.id}`;
 }
 
@@ -104,39 +94,51 @@ async function processQueue() {
     const title = currentSong.replace('.mp3', '');
 
     try {
-        await bot.telegram.sendMessage(ADMIN_ID, `🚀 Starting Optimized Process: ${title}`);
-
-        const imgUrl = await getRandomImages(title);
+        const duration = await getAudioDuration(audioPath);
+        const imgUrl = await axios.get(`https://api.pexels.com/v1/search?query=meditation&per_page=1`, {
+            headers: { 'Authorization': process.env.PEXELS_KEY }
+        }).then(r => r.data.photos[0].src.large2x);
+        
         const imgPath = path.join(__dirname, 'images', 'bg.jpg');
         const writer = fs.createWriteStream(imgPath);
         (await axios({url: imgUrl, responseType: 'stream'})).data.pipe(writer);
         await new Promise(r => writer.on('finish', r));
 
-        const thumbPath = await createThumbnail(imgPath, title);
+        const thumbPath = await createCanvasThumb(imgPath, title);
 
-        // အမြန်နှုန်းအတွက် Rendering ကို သီချင်းအရှည်အတိုင်းပဲ အရင်လုပ်သည်
-        const baseVideo = await renderShortBase(audioPath, imgPath, title, false);
-        
-        // ၁ နာရီစာ ဖြစ်အောင် အမြန်ဆုံး Loop ပတ်သည်
-        const finalVideo = await loopToHour(baseVideo, title);
+        // --- LONG VIDEO ---
+        const baseLong = await renderBase(audioPath, imgPath, false);
+        const finalLong = await loopToOneHour(baseLong, duration, title);
+        const longUrl = await uploadVideo(finalLong, thumbPath, title, false);
 
-        const videoUrl = await uploadToYouTube(finalVideo, thumbPath, title);
+        // --- SHORTS VIDEO ---
+        const finalShorts = await renderBase(audioPath, imgPath, true);
+        const shortsUrl = await uploadVideo(finalShorts, thumbPath, title, true);
 
-        await bot.telegram.sendMessage(ADMIN_ID, `✅ Done! (Speed Mode)\n🔗 Link: ${videoUrl}`);
+        await bot.telegram.sendMessage(ADMIN_ID, `✅ Success!\n🎬 Long: ${longUrl}\n📱 Shorts: ${shortsUrl}`);
 
-        // Cleanup
-        fs.removeSync(audioPath);
+        // CLEANUP (Storage မပြည့်အောင် အကုန်ဖျက်မည်)
         fs.emptyDirSync('./temp');
         fs.emptyDirSync('./output');
-        fs.emptyDirSync('./images');
+        fs.removeSync(audioPath);
 
     } catch (err) {
         await bot.telegram.sendMessage(ADMIN_ID, `❌ Error: ${err.message}`);
     }
 }
 
-if (process.env.RUN_WORKFLOW === 'true') {
-    processQueue();
-} else {
-    bot.launch();
+async function createCanvasThumb(imagePath, title) {
+    const canvas = createCanvas(1280, 720);
+    const ctx = canvas.getContext('2d');
+    const img = await loadImage(imagePath);
+    ctx.drawImage(img, 0, 0, 1280, 720);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.fillRect(0, 500, 1280, 220);
+    ctx.fillStyle = 'white'; ctx.font = 'bold 50px Arial';
+    ctx.fillText(title.toUpperCase(), 50, 600);
+    const outPath = path.join(__dirname, 'output', 'thumb.jpg');
+    fs.writeFileSync(outPath, canvas.toBuffer('image/jpeg'));
+    return outPath;
 }
+
+if (process.env.RUN_WORKFLOW === 'true') { processQueue(); } else { bot.launch(); }
