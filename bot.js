@@ -15,7 +15,11 @@ dirs.forEach(dir => fs.ensureDirSync(path.join(__dirname, dir)));
 
 const credentials = require('./credentials.json');
 const token = require('./token.json');
-const oauth2Client = new google.auth.OAuth2(credentials.installed.client_id, credentials.installed.client_secret, credentials.installed.redirect_uris[0]);
+const oauth2Client = new google.auth.OAuth2(
+    credentials.installed.client_id,
+    credentials.installed.client_secret,
+    credentials.installed.redirect_uris[0]
+);
 oauth2Client.setCredentials(token);
 const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
 
@@ -53,9 +57,10 @@ async function getAudioDuration(filePath) {
 async function getMultipleImages(query) {
     try {
         const randomPage = Math.floor(Math.random() * 20) + 1;
-        const res = await axios.get(`https://api.pexels.com/v1/search?query=${query}&per_page=5&page=${randomPage}`, {
-            headers: { 'Authorization': process.env.PEXELS_KEY }
-        });
+        const res = await axios.get(
+            `https://api.pexels.com/v1/search?query=${query}&per_page=5&page=${randomPage}`,
+            { headers: { 'Authorization': process.env.PEXELS_KEY } }
+        );
         const urls = res.data.photos.map(p => p.src.large2x);
         const paths = [];
         for (let i = 0; i < urls.length; i++) {
@@ -70,30 +75,45 @@ async function getMultipleImages(query) {
     } catch (e) { return []; }
 }
 
+// ✅ renderSlideshow - တစ်ကြိမ်သာ declare လုပ်ထားပါတယ် (fixed version)
 async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
     const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
     const size = isShorts ? '1080x1920' : '1920x1080';
-    
+    const scaleSize = isShorts ? '1080:1920' : '1920:1080';
+
     return new Promise((resolve, reject) => {
         let ff = ffmpeg();
         imagePaths.forEach(img => ff.input(img).inputOptions(['-loop 1', '-t 12']));
         ff.input(audioPath);
 
-        let filter = imagePaths.map((_, i) => `[${i}:v]scale=${size.replace('x', ':')}:force_original_aspect_ratio=increase,crop=${size.replace('x', ':')},zoompan=z='min(zoom+0.001,1.2)':d=300:s=${size}[v${i}]`).join(';');
-        filter += ';' + imagePaths.map((_, i) => `[v${i}]`).join('') + `concat=n=${imagePaths.length}:v=1:a=0[outv]`;
+        let filter = imagePaths.map((_, i) =>
+            `[${i}:v]scale=${scaleSize}:force_original_aspect_ratio=increase,crop=${scaleSize},zoompan=z='min(zoom+0.001,1.2)':d=300:s=${size}[v${i}]`
+        ).join(';');
+
+        filter += ';' + imagePaths.map((_, i) => `[v${i}]`).join('') +
+            `concat=n=${imagePaths.length}:v=1:a=0[outv]`;
 
         ff.complexFilter([filter])
-          .outputOptions(['-map [outv]', `-map ${imagePaths.length}:a`, '-pix_fmt yuv420p', '-shortest'])
+          .outputOptions([
+              '-map [outv]',
+              `-map ${imagePaths.length}:a`,
+              '-pix_fmt yuv420p',
+              '-c:v libx264',
+              '-preset ultrafast',
+              '-shortest'
+          ])
           .on('end', () => resolve(outPath))
-          .on('error', (err) => reject(err))
+          .on('error', (err) => {
+              console.error("FFmpeg Details:", err.message);
+              reject(err);
+          })
           .save(outPath);
     });
 }
 
 async function loopToOneHour(baseVideoPath, finalName) {
     const outPath = path.join(__dirname, 'output', `${finalName}_long.mp4`);
-    // Slideshow duration is roughly 60s (5 images * 12s)
-    const loopCount = 60; 
+    const loopCount = 60;
     const targetDuration = 3600 + Math.floor(Math.random() * 120);
 
     return new Promise((resolve, reject) => {
@@ -110,17 +130,20 @@ async function uploadVideo(filePath, thumbPath, title, isShorts = false) {
     const res = await youtube.videos.insert({
         part: 'snippet,status',
         requestBody: {
-            snippet: { 
-                title: isShorts ? `${title} #shorts #meditation` : `${title} | Relaxing Music`, 
-                description: isShorts ? `Short meditation. #shorts` : `1-hour session. #meditation`, 
-                categoryId: '10' 
+            snippet: {
+                title: isShorts ? `${title} #shorts #meditation` : `${title} | Relaxing Music`,
+                description: isShorts ? `Short meditation. #shorts` : `1-hour session. #meditation`,
+                categoryId: '10'
             },
             status: { privacyStatus: 'public' }
         },
         media: { body: fs.createReadStream(filePath) }
     });
     if (!isShorts) {
-        await youtube.thumbnails.set({ videoId: res.data.id, media: { body: fs.createReadStream(thumbPath) } });
+        await youtube.thumbnails.set({
+            videoId: res.data.id,
+            media: { body: fs.createReadStream(thumbPath) }
+        });
     }
     return `https://youtu.be/${res.data.id}`;
 }
@@ -132,7 +155,8 @@ async function createCanvasThumb(imagePath, title) {
     ctx.drawImage(img, 0, 0, 1280, 720);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
     ctx.fillRect(0, 500, 1280, 220);
-    ctx.fillStyle = 'white'; ctx.font = 'bold 50px Arial';
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 50px Arial';
     ctx.fillText(title.toUpperCase(), 50, 600);
     const outPath = path.join(__dirname, 'output', 'thumb.jpg');
     fs.writeFileSync(outPath, canvas.toBuffer('image/jpeg'));
@@ -159,7 +183,9 @@ async function processQueue() {
         const finalShorts = await renderSlideshow(audioPath, [imagePaths[0]], true);
         const shortsUrl = await uploadVideo(finalShorts, thumbPath, title, true);
 
-        await bot.telegram.sendMessage(ADMIN_ID, `✅ Uploaded!\n🎬 Long: ${longUrl}\n📱 Shorts: ${shortsUrl}`);
+        await bot.telegram.sendMessage(ADMIN_ID,
+            `✅ Uploaded!\n🎬 Long: ${longUrl}\n📱 Shorts: ${shortsUrl}`
+        );
 
         fs.emptyDirSync('./temp');
         fs.emptyDirSync('./output');
@@ -171,38 +197,4 @@ async function processQueue() {
 }
 
 // --- START LOGIC ---
-
-async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
-    const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
-    const size = isShorts ? '1080x1920' : '1920x1080';
-    const scaleSize = isShorts ? '1080:1920' : '1920:1080';
-    
-    return new Promise((resolve, reject) => {
-        let ff = ffmpeg();
-        imagePaths.forEach(img => ff.input(img).inputOptions(['-loop 1', '-t 12']));
-        ff.input(audioPath);
-
-        // Filter expression ကို ပိုမိုရှင်းလင်းအောင် ပြင်ထားပါတယ်
-        let filter = imagePaths.map((_, i) => 
-            `[${i}:v]scale=${scaleSize}:force_original_aspect_ratio=increase,crop=${scaleSize},zoompan=z='min(zoom+0.001,1.2)':d=300:s=${size}[v${i}]`
-        ).join(';');
-        
-        filter += ';' + imagePaths.map((_, i) => `[v${i}]`).join('') + `concat=n=${imagePaths.length}:v=1:a=0[outv]`;
-
-        ff.complexFilter([filter])
-          .outputOptions([
-              '-map [outv]', 
-              `-map ${imagePaths.length}:a`, 
-              '-pix_fmt yuv420p', 
-              '-c:v libx264', 
-              '-preset ultrafast', // GitHub Actions မြန်စေရန်
-              '-shortest'
-          ])
-          .on('end', () => resolve(outPath))
-          .on('error', (err) => {
-              console.error("FFmpeg Details:", err.message);
-              reject(err);
-          })
-          .save(outPath);
-    });
-}
+processQueue();
