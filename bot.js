@@ -75,36 +75,52 @@ async function getMultipleImages(query) {
     } catch (e) { return []; }
 }
 
-// ✅ renderSlideshow - တစ်ကြိမ်သာ declare လုပ်ထားပါတယ် (fixed version)
+// ✅ Fixed: zoompan ဖယ်ပြီး simple scale+crop+concat သုံးထားတယ်
 async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
     const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
-    const size = isShorts ? '1080x1920' : '1920x1080';
-    const scaleSize = isShorts ? '1080:1920' : '1920:1080';
+    const width  = isShorts ? 1080 : 1920;
+    const height = isShorts ? 1920 : 1080;
+    const imgDuration = 12;
+    const n = imagePaths.length;
 
     return new Promise((resolve, reject) => {
         let ff = ffmpeg();
-        imagePaths.forEach(img => ff.input(img).inputOptions(['-loop 1', '-t 12']));
+
+        imagePaths.forEach(img => {
+            ff.input(img).inputOptions(['-loop 1', `-t ${imgDuration}`]);
+        });
         ff.input(audioPath);
 
-        let filter = imagePaths.map((_, i) =>
-            `[${i}:v]scale=${scaleSize}:force_original_aspect_ratio=increase,crop=${scaleSize},zoompan=z='min(zoom+0.001,1.2)':d=300:s=${size}[v${i}]`
-        ).join(';');
+        // Scale + crop each image, then concat
+        const scaleFilters = imagePaths.map((_, i) =>
+            `[${i}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,` +
+            `crop=${width}:${height},setsar=1,fps=25[v${i}]`
+        );
+        const concatInput  = imagePaths.map((_, i) => `[v${i}]`).join('');
+        const concatFilter = `${concatInput}concat=n=${n}:v=1:a=0[outv]`;
+        const filterComplex = [...scaleFilters, concatFilter].join(';');
 
-        filter += ';' + imagePaths.map((_, i) => `[v${i}]`).join('') +
-            `concat=n=${imagePaths.length}:v=1:a=0[outv]`;
-
-        ff.complexFilter([filter])
+        ff.complexFilter(filterComplex)
           .outputOptions([
               '-map [outv]',
-              `-map ${imagePaths.length}:a`,
-              '-pix_fmt yuv420p',
+              `-map ${n}:a`,
               '-c:v libx264',
               '-preset ultrafast',
-              '-shortest'
+              '-crf 23',
+              '-pix_fmt yuv420p',
+              '-c:a aac',
+              '-b:a 192k',
+              '-shortest',
+              '-avoid_negative_ts make_zero'
           ])
-          .on('end', () => resolve(outPath))
-          .on('error', (err) => {
-              console.error("FFmpeg Details:", err.message);
+          .on('start', cmd => console.log('FFmpeg cmd:', cmd))
+          .on('end', () => {
+              console.log('renderSlideshow done:', outPath);
+              resolve(outPath);
+          })
+          .on('error', (err, stdout, stderr) => {
+              console.error('FFmpeg error:', err.message);
+              console.error('FFmpeg stderr:', stderr);
               reject(err);
           })
           .save(outPath);
@@ -174,14 +190,16 @@ async function processQueue() {
 
     try {
         const imagePaths = await getMultipleImages('nature meditation');
+        if (imagePaths.length === 0) throw new Error("No images fetched from Pexels");
+
         const thumbPath = await createCanvasThumb(imagePaths[0], title);
 
-        const baseLong = await renderSlideshow(audioPath, imagePaths, false);
-        const finalLong = await loopToOneHour(baseLong, title);
-        const longUrl = await uploadVideo(finalLong, thumbPath, title, false);
+        const baseLong   = await renderSlideshow(audioPath, imagePaths, false);
+        const finalLong  = await loopToOneHour(baseLong, title);
+        const longUrl    = await uploadVideo(finalLong, thumbPath, title, false);
 
         const finalShorts = await renderSlideshow(audioPath, [imagePaths[0]], true);
-        const shortsUrl = await uploadVideo(finalShorts, thumbPath, title, true);
+        const shortsUrl   = await uploadVideo(finalShorts, thumbPath, title, true);
 
         await bot.telegram.sendMessage(ADMIN_ID,
             `✅ Uploaded!\n🎬 Long: ${longUrl}\n📱 Shorts: ${shortsUrl}`
@@ -196,5 +214,5 @@ async function processQueue() {
     }
 }
 
-// --- START LOGIC ---
+// --- START ---
 processQueue();
