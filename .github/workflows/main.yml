@@ -17,23 +17,27 @@ jobs:
         with:
           persist-credentials: true
 
-      - name: Cache Dependencies
+      # Libraries တွေကို သိမ်းထားရန် (ဒါက အချိန်အများကြီး သက်သာစေပါမယ်)
+      - name: Cache System Dependencies
         uses: actions/cache@v3
         with:
-          path: |
-            /var/cache/apt
-            node_modules
-          key: ${{ runner.os }}-cache-${{ hashFiles('package-lock.json') }}
+          path: /var/cache/apt/archives
+          key: ${{ runner.os }}-apt-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
 
       - name: Install System Dependencies
         run: |
+          sudo rm -rf /var/lib/apt/lists/*
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev ffmpeg
+          # မရှိမဖြစ်လိုအပ်တာတွေကိုပဲ သွင်းပြီး ကျန်တာကို skip လုပ်ခိုင်းထားပါတယ်
+          sudo apt-get install -y -qq --no-install-recommends build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev ffmpeg
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install Node Dependencies
         run: npm install
