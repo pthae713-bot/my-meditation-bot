@@ -1,8 +1,8 @@
 name: Auto Post Meditation
 on:
   schedule:
-    - cron: '0 22 * * *' # မြန်မာစံတော်ချိန် မနက် ၄:၃၀ (US ညပိုင်း)
-    - cron: '0 10 * * *' # မြန်မာစံတော်ချိန် ညနေ ၄:၃၀ (Europe ညပိုင်း)
+    - cron: '0 22 * * *' 
+    - cron: '0 10 * * *' 
   workflow_dispatch:
 
 jobs:
@@ -10,16 +10,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: Install FFmpeg
-        run: sudo apt install -y ffmpeg
-      - name: Install Dependencies
-        run: npm install
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev ffmpeg
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Node Dependencies
+        run: |
+          rm -rf node_modules
+          npm install
+
       - name: Run Workflow
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           PEXELS_KEY: ${{ secrets.PEXELS_KEY }}
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
           RUN_WORKFLOW: 'true'
         run: node bot.js
+
       - name: Commit Changes
         run: |
           git config --global user.name "Bot"
