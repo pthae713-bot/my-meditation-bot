@@ -20,34 +20,37 @@ oauth2Client.setCredentials(token);
 const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
 
 /**
- * ၁။ Telegram ဆီကနေ သီချင်းအသစ်တွေရှိရင် အကုန်ဒေါင်းယူမည့် Function
+ * ၁။ Telegram မှ အသစ်ရောက်နေသော သီချင်းများကို Auto-Sync လုပ်ခြင်း
+ * ဤအဆင့်သည် PC မဖွင့်ဘဲ GitHub Actions ပေါ်မှာတင် သီချင်းများကို သိမ်းဆည်းပေးမည်။
  */
 async function syncTelegramSongs() {
-    console.log("📡 Checking for new songs from Telegram...");
+    console.log("📥 Checking for new songs from Telegram...");
     try {
-        const updates = await bot.telegram.getUpdates({ offset: -100 });
-        const audioUpdates = updates.filter(u => u.message && u.message.audio);
+        // Bot ဆီရောက်နေသော updates များကို ရယူသည်
+        const updates = await bot.telegram.getUpdates(0, 100, -1);
+        
+        for (const update of updates) {
+            if (update.message && update.message.audio) {
+                const audio = update.message.audio;
+                const fileName = audio.file_name || `track_${Date.now()}.mp3`;
+                const filePath = path.join(__dirname, 'songs', fileName);
 
-        for (const update of audioUpdates) {
-            const file = update.message.audio;
-            const fileName = file.file_name || `track_${file.file_unique_id}.mp3`;
-            const savePath = path.join(__dirname, 'songs', fileName);
-
-            if (!fs.existsSync(savePath)) {
-                console.log(`📥 Downloading: ${fileName}`);
-                const link = await bot.telegram.getFileLink(file.file_id);
-                const response = await axios({ url: link.href, responseType: 'stream' });
-                const writer = fs.createWriteStream(savePath);
-                response.data.pipe(writer);
-                await new Promise(r => writer.on('finish', r));
+                // ဖိုင်မရှိသေးမှ ဒေါင်းမည်
+                if (!fs.existsSync(filePath)) {
+                    console.log(`Downloading: ${fileName}`);
+                    const fileLink = await bot.telegram.getFileLink(audio.file_id);
+                    const response = await axios({ url: fileLink.href, responseType: 'stream' });
+                    const writer = fs.createWriteStream(filePath);
+                    response.data.pipe(writer);
+                    await new Promise(r => writer.on('finish', r));
+                }
             }
         }
     } catch (e) {
-        console.log("Note: Telegram offset might be expired or no new messages.");
+        console.log("Sync Error:", e.message);
     }
 }
 
-// ၂။ သီချင်းအရှည်တိုင်းတာခြင်း
 async function getAudioDuration(filePath) {
     return new Promise((resolve, reject) => {
         ffmpeg.ffprobe(filePath, (err, metadata) => {
@@ -57,23 +60,73 @@ async function getAudioDuration(filePath) {
     });
 }
 
-// ၃။ Video Render & Loop Logic (၁ နာရီကျော်အောင် တွက်ချက်သည်)
+async function renderBase(audioPath, imagePath, isShorts = false) {
+    const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
+    const size = isShorts ? '1080x1920' : '1920x1080';
+    const duration = isShorts ? 58 : null;
+
+    return new Promise((resolve, reject) => {
+        let ff = ffmpeg().input(imagePath).inputOptions(['-loop 1']).input(audioPath);
+        let filter = `[0:v]zoompan=z='min(zoom+0.001,1.3)':d=1:x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2',scale=${size.replace('x', ':')}:force_original_aspect_ratio=increase,crop=${size.replace('x', ':')}[bg]`;
+        
+        let command = ff.complexFilter([filter]).outputOptions(['-map [bg]', '-map 1:a', '-pix_fmt yuv420p', '-shortest']);
+        if (duration) command.setDuration(duration);
+        
+        command.on('end', () => resolve(outPath)).on('error', reject).save(outPath);
+    });
+}
+
+async function loopToOneHour(baseVideoPath, audioDuration, finalName) {
+    const outPath = path.join(__dirname, 'output', `${finalName}_long.mp4`);
+    const loopCount = Math.ceil(3600 / audioDuration);
+    const randomExtraTime = Math.floor(Math.random() * 120) + 60; 
+    const targetDuration = 3600 + randomExtraTime;
+
+    return new Promise((resolve, reject) => {
+        ffmpeg(baseVideoPath)
+            .inputOptions([`-stream_loop ${loopCount}`])
+            .outputOptions(['-c copy', `-t ${targetDuration}`])
+            .on('end', () => resolve(outPath))
+            .on('error', reject)
+            .save(outPath);
+    });
+}
+
+async function uploadVideo(filePath, thumbPath, title, isShorts = false) {
+    const res = await youtube.videos.insert({
+        part: 'snippet,status',
+        requestBody: {
+            snippet: { 
+                title: isShorts ? `${title} #shorts #meditation` : `${title} | Relaxing Sleep Music`, 
+                description: isShorts ? `Relax in seconds. #shorts` : `Full 1-hour session. #meditation #sleep`, 
+                categoryId: '10' 
+            },
+            status: { privacyStatus: 'public' }
+        },
+        media: { body: fs.createReadStream(filePath) }
+    });
+    if (!isShorts) {
+        await youtube.thumbnails.set({ videoId: res.data.id, media: { body: fs.createReadStream(thumbPath) } });
+    }
+    return `https://youtu.be/${res.data.id}`;
+}
+
 async function processQueue() {
-    // ပထမဆုံး Telegram က သီချင်းတွေကို အရင်စုဆောင်းသည်
+    // ပထမဆုံး Telegram က သီချင်းအသစ်တွေကို Sync လုပ်မည်
     await syncTelegramSongs();
 
     const songs = fs.readdirSync('./songs').filter(f => f.endsWith('.mp3')).sort();
-    if (songs.length === 0) return console.log("📭 No songs available to process.");
+    if (songs.length === 0) {
+        console.log("No songs available to process.");
+        return;
+    }
 
     const currentSong = songs[0];
     const audioPath = path.join(__dirname, 'songs', currentSong);
     const title = currentSong.replace('.mp3', '');
 
     try {
-        await bot.telegram.sendMessage(ADMIN_ID, `🎬 Processing: ${title}`);
         const duration = await getAudioDuration(audioPath);
-        
-        // Pexels ပုံယူခြင်း
         const imgUrl = await axios.get(`https://api.pexels.com/v1/search?query=meditation&per_page=1`, {
             headers: { 'Authorization': process.env.PEXELS_KEY }
         }).then(r => r.data.photos[0].src.large2x);
@@ -83,56 +136,48 @@ async function processQueue() {
         (await axios({url: imgUrl, responseType: 'stream'})).data.pipe(writer);
         await new Promise(r => writer.on('finish', r));
 
-        // Video Base လုပ်ခြင်း
-        const baseVideo = await renderBase(audioPath, imgPath);
-        
-        // ၁ နာရီကျော်အောင် Loop ပတ်ခြင်း
-        const loopCount = Math.ceil(3600 / duration);
-        const targetDuration = 3600 + (Math.floor(Math.random() * 120) + 60);
-        const finalVideo = path.join(__dirname, 'output', 'final_long.mp4');
+        const thumbPath = await createCanvasThumb(imgPath, title);
 
-        await new Promise((resolve, reject) => {
-            ffmpeg(baseVideo).inputOptions([`-stream_loop ${loopCount}`])
-                .outputOptions(['-c copy', `-t ${targetDuration}`])
-                .on('end', resolve).on('error', reject).save(finalVideo);
-        });
+        const baseLong = await renderBase(audioPath, imgPath, false);
+        const finalLong = await loopToOneHour(baseLong, duration, title);
+        const longUrl = await uploadVideo(finalLong, thumbPath, title, false);
 
-        // YouTube တင်ခြင်း
-        const videoUrl = await uploadVideo(finalVideo, title);
-        await bot.telegram.sendMessage(ADMIN_ID, `✅ Done! Video uploaded: ${videoUrl}`);
+        const finalShorts = await renderBase(audioPath, imgPath, true);
+        const shortsUrl = await uploadVideo(finalShorts, thumbPath, title, true);
 
-        // အောင်မြင်မှသာ အသုံးပြုခဲ့သော သီချင်းကို ဖျက်သည်
-        fs.removeSync(audioPath);
+        await bot.telegram.sendMessage(ADMIN_ID, `✅ Success!\n🎬 Long: ${longUrl}\n📱 Shorts: ${shortsUrl}`);
+
+        // အသုံးပြုပြီးသော သီချင်းတစ်ပုဒ်တည်းကိုသာ ဖျက်မည်
         fs.emptyDirSync('./temp');
         fs.emptyDirSync('./output');
+        fs.removeSync(audioPath);
 
     } catch (err) {
-        console.error(err);
         await bot.telegram.sendMessage(ADMIN_ID, `❌ Error: ${err.message}`);
     }
 }
 
-// (renderBase နှင့် uploadVideo function များသည် အရင် Version အတိုင်းဖြစ်သည်)
-async function renderBase(audioPath, imagePath) {
-    const outPath = path.join(__dirname, 'temp', `base.mp4`);
-    return new Promise((resolve, reject) => {
-        ffmpeg().input(imagePath).inputOptions(['-loop 1']).input(audioPath)
-          .complexFilter(["[0:v]zoompan=z='min(zoom+0.001,1.3)':d=1:x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2',scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[bg]"])
-          .outputOptions(['-map [bg]', '-map 1:a', '-pix_fmt yuv420p', '-shortest'])
-          .on('end', () => resolve(outPath)).on('error', reject).save(outPath);
-    });
+async function createCanvasThumb(imagePath, title) {
+    const canvas = createCanvas(1280, 720);
+    const ctx = canvas.getContext('2d');
+    const img = await loadImage(imagePath);
+    ctx.drawImage(img, 0, 0, 1280, 720);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.fillRect(0, 500, 1280, 220);
+    ctx.fillStyle = 'white'; ctx.font = 'bold 50px Arial';
+    ctx.fillText(title.toUpperCase(), 50, 600);
+    const outPath = path.join(__dirname, 'output', 'thumb.jpg');
+    fs.writeFileSync(outPath, canvas.toBuffer('image/jpeg'));
+    return outPath;
 }
 
-async function uploadVideo(filePath, title) {
-    const res = await youtube.videos.insert({
-        part: 'snippet,status',
-        requestBody: {
-            snippet: { title: `${title} | Relaxing Meditation`, categoryId: '10' },
-            status: { privacyStatus: 'public' }
-        },
-        media: { body: fs.createReadStream(filePath) }
+// GitHub Actions ကနေ Run တာဆိုရင် processQueue ကို တိုက်ရိုက်ခေါ်သည်
+if (process.env.RUN_WORKFLOW === 'true') { 
+    processQueue(); 
+} else {
+    // Local မှာ PC နဲ့ run ထားချင်ရင် audio listen လုပ်လို့ရအောင် ထားပေးသည်
+    bot.on('audio', async (ctx) => {
+        ctx.reply("📥 သီချင်းကို လက်ခံရရှိပါတယ်။ GitHub Action အချိန်ကျရင် အလိုအလျောက် သိမ်းဆည်းသွားပါလိမ့်မယ်။");
     });
-    return `https://youtu.be/${res.data.id}`;
+    bot.launch();
 }
-
-if (process.env.RUN_WORKFLOW === 'true') { processQueue(); } else { bot.launch(); }
