@@ -268,7 +268,7 @@ async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
         
         let textFilter = '';
         if (quote) {
-            const fontPath = 'C:/Windows/Fonts/Arial.ttf';
+            const fontPath = 'C\\\\:/Windows/Fonts/Arial.ttf'; // Windows path requires escaping the colon for ffmpeg
             const escapedQuote = quote.replace(/'/g, `\\\\\\'`).replace(/:/g, `\\\\:`);
             textFilter = `[v_no_text]drawtext=fontfile='${fontPath}':text='${escapedQuote}':fontsize=42:fontcolor=white:x=(w-text_w)/2:y=h-text_h-80:box=1:boxcolor=black@0.4:boxborderw=15[v_with_text]`;
         }
@@ -305,7 +305,11 @@ async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
           ])
           .on('start', cmd => console.log('FFmpeg Render Start with AI Content'))
           .on('end', () => resolve(outPath))
-          .on('error', (err) => reject(err))
+          .on('error', (err, stdout, stderr) => {
+              console.error('Cannot process video: ' + err.message);
+              console.error('ffmpeg stderr:\n' + stderr);
+              reject(new Error('FFmpeg failed during render. Check logs.'));
+          })
           .save(outPath);
     });
 }
@@ -326,7 +330,11 @@ async function loopToOneHour(baseVideoPath, finalName) {
                 '-pix_fmt yuv420p'
             ])
             .on('end', () => resolve(outPath))
-            .on('error', reject)
+            .on('error', (err, stdout, stderr) => {
+                console.error('Cannot loop video: ' + err.message);
+                console.error('ffmpeg stderr:\n' + stderr);
+                reject(new Error('FFmpeg failed during loop. Check logs.'));
+            })
             .save(outPath);
     });
 }
