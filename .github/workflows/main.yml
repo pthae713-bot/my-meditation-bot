@@ -1,0 +1,29 @@
+name: Auto Post Meditation
+on:
+  schedule:
+    - cron: '0 22 * * *' # မြန်မာစံတော်ချိန် မနက် ၄:၃၀ (US ညပိုင်း)
+    - cron: '0 10 * * *' # မြန်မာစံတော်ချိန် ညနေ ၄:၃၀ (Europe ညပိုင်း)
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install FFmpeg
+        run: sudo apt install -y ffmpeg
+      - name: Install Dependencies
+        run: npm install
+      - name: Run Workflow
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PEXELS_KEY: ${{ secrets.PEXELS_KEY }}
+          RUN_WORKFLOW: 'true'
+        run: node bot.js
+      - name: Commit Changes
+        run: |
+          git config --global user.name "Bot"
+          git config --global user.email "bot@action.com"
+          git add songs/
+          git commit -m "Remove processed song" || exit 0
+          git push
