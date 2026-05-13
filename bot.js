@@ -23,25 +23,98 @@ const oauth2Client = new google.auth.OAuth2(
 oauth2Client.setCredentials(token);
 const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
 
-// --- FUNCTIONS ---
+const LAST_UPDATE_ID_LOG = path.join(__dirname, 'last_update_id.txt');
+
+// --- HELPER FUNCTIONS ---
+
+// နောက်ဆုံး update ID ကို ဖတ်ယူသည်
+function getLastUpdateId() {
+    if (!fs.existsSync(LAST_UPDATE_ID_LOG)) {
+        return 0;
+    }
+    const data = fs.readFileSync(LAST_UPDATE_ID_LOG, 'utf8');
+    return parseInt(data, 10) || 0;
+}
+
+// နောက်ဆုံး update ID ကို မှတ်တမ်းတင်သည်
+function saveLastUpdateId(id) {
+    fs.writeFileSync(LAST_UPDATE_ID_LOG, id.toString());
+}
+
+// quotable.io API မှ ကျပန်း English quote ကို ခေါ်ယူသည်
+async function fetchRandomQuote() {
+    try {
+        const response = await axios.get('https://api.quotable.io/random?maxLength=150');
+        if (response.data && response.data.content) {
+            return `"${response.data.content}" - ${response.data.author}`;
+        }
+        return null;
+    } catch (error) {
+        console.error("Failed to fetch quote:", error.message);
+        return null; // Error ဖြစ်ပါက video render မပျက်အောင် null ပြန်ပေးသည်
+    }
+}
+
+// --- MAIN FUNCTIONS ---
 
 async function syncTelegramSongs() {
     try {
-        const updates = await bot.telegram.getUpdates(0, 100, -1);
+        const lastUpdateId = getLastUpdateId();
+        const updates = await bot.telegram.getUpdates(lastUpdateId + 1, 100, 0);
+
+        if (updates.length === 0) {
+            console.log("No new songs from Telegram.");
+            return;
+        }
+
+        let newMaxUpdateId = lastUpdateId;
+        const downloadPromises = [];
+
         for (const update of updates) {
+            newMaxUpdateId = Math.max(newMaxUpdateId, update.update_id);
+
             if (update.message && update.message.audio) {
                 const audio = update.message.audio;
                 const fileName = audio.file_name || `track_${Date.now()}.mp3`;
-                const filePath = path.join(__dirname, 'songs', fileName);
-                if (!fs.existsSync(filePath)) {
-                    const fileLink = await bot.telegram.getFileLink(audio.file_id);
-                    const response = await axios({ url: fileLink.href, responseType: 'stream' });
-                    const writer = fs.createWriteStream(filePath);
-                    response.data.pipe(writer);
-                    await new Promise(r => writer.on('finish', r));
+
+                const localPath = path.join(__dirname, 'songs', fileName);
+                const processedPath = path.join(__dirname, 'songs', 'processed', fileName);
+
+                if (!fs.existsSync(localPath) && !fs.existsSync(processedPath)) {
+                    // ဒေါင်းလုဒ် promise တစ်ခု ဖန်တီးပြီး စာရင်းထဲထည့်သည်
+                    const downloadPromise = (async () => {
+                        try {
+                            const fileLink = await bot.telegram.getFileLink(audio.file_id);
+                            const response = await axios({ url: fileLink.href, responseType: 'stream' });
+                            const writer = fs.createWriteStream(localPath);
+                            response.data.pipe(writer);
+                            await new Promise((resolve, reject) => {
+                                writer.on('finish', resolve);
+                                writer.on('error', reject);
+                            });
+                            console.log(`Downloaded new song: ${fileName}`);
+                        } catch (downloadError) {
+                            console.error(`Failed to download ${fileName}:`, downloadError.message);
+                        }
+                    })();
+                    downloadPromises.push(downloadPromise);
                 }
             }
         }
+
+        // ဒေါင်းလုဒ် promise အားလုံးကို တစ်ပြိုင်နက်တည်း run သည်
+        if (downloadPromises.length > 0) {
+            console.log(`Starting download of ${downloadPromises.length} new song(s)...`);
+            await Promise.all(downloadPromises);
+            console.log("All new songs downloaded.");
+        }
+
+        // စစ်ဆေးပြီးသမျှထဲက အကြီးဆုံး update ID ကို မှတ်တမ်းတင်သည်
+        if (newMaxUpdateId > lastUpdateId) {
+            saveLastUpdateId(newMaxUpdateId);
+            console.log(`Saved last update ID: ${newMaxUpdateId}`);
+        }
+
     } catch (e) { console.log("Sync Error:", e.message); }
 }
 
@@ -113,54 +186,110 @@ What did you feel while listening to "${cleanTitle}"? Let us know in the replies
     return { description, tags, pinComment };
 }
 
-// ✅ Fix: သီချင်းအရှည်အတိုင်း ပုံများကို တွက်ချက်ပြသပေးသည်
 async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
     const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
     const width  = isShorts ? 1080 : 1920;
     const height = isShorts ? 1920 : 1080;
     
-    // သီချင်း duration ကို အတိအကျယူသည်
     const duration = await getAudioDuration(audioPath);
     const n = imagePaths.length;
-    // ပုံတစ်ပုံချင်းစီ၏ duration ကို သီချင်းအရှည်နှင့် ညှိသည်
+    if (n === 0) return Promise.reject(new Error("No images provided for slideshow."));
     const imgDuration = duration / n;
+
+    // API မှ Quotes များကို ခေါ်ယူရန် ပြင်ဆင်ခြင်း
+    const quoteInterval = 20; // စာသားတစ်ခုပြသမည့်အချိန် (စက္ကန့်)
+    const numQuotesToFetch = Math.floor(duration / quoteInterval);
+    let quotes = [];
+
+    if (numQuotesToFetch > 0 && !isShorts) {
+        console.log(`Fetching ${numQuotesToFetch} random English quotes...`);
+        const quotePromises = Array(numQuotesToFetch).fill(null).map(() => fetchRandomQuote());
+        const fetchedQuotes = await Promise.all(quotePromises);
+        quotes = fetchedQuotes.filter(Boolean); // null များဖယ်ထုတ်ခြင်း
+        console.log(`Successfully fetched ${quotes.length} quotes.`);
+    }
 
     return new Promise((resolve, reject) => {
         let ff = ffmpeg();
 
         imagePaths.forEach(img => {
-            ff.input(img).inputOptions(['-loop 1', `-t ${imgDuration}`]);
+            ff.input(img);
         });
         ff.input(audioPath);
 
-        const scaleFilters = imagePaths.map((_, i) =>
-            `[${i}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,` +
-            `crop=${width}:${height},setsar=1,fps=25,format=yuv420p[v${i}]`
-        );
+        const finalFps = 25;
+
+        // Ken Burns Effect Filters
+        const effectFilters = imagePaths.map((_, i) => {
+            const isZoomIn = Math.random() < 0.5;
+            const startZoom = isZoomIn ? 1.0 : 1.15;
+            const endZoom = isZoomIn ? 1.15 : 1.0;
+            const xPan = ['iw/2-(iw/zoom/2)', '0', 'iw-iw/zoom'][Math.floor(Math.random() * 3)];
+            const yPan = ['ih/2-(ih/zoom/2)', '0', 'ih-ih/zoom'][Math.floor(Math.random() * 3)];
+            const preScale = 1.2;
+
+            return `[${i}:v]scale=${width * preScale}:${height * preScale}:force_original_aspect_ratio=increase,` +
+                   `crop=${width * preScale}:${height * preScale},` +
+                   `zoompan=z='on*(${endZoom}-${startZoom})/(${imgDuration * finalFps})+${startZoom}':` +
+                   `x='${xPan}':y='${yPan}':d=${Math.ceil(imgDuration * finalFps)}:` +
+                   `s=${width}x${height}:fps=${finalFps},setsar=1,format=yuv420p[v${i}]`;
+        });
         
         const concatInput  = imagePaths.map((_, i) => `[v${i}]`).join('');
-        const concatFilter = `${concatInput}concat=n=${n}:v=1:a=0[outv]`;
+        const concatFilter = `${concatInput}concat=n=${n}:v=1:a=0[v_no_text]`;
         
+        // DrawText (Quotes) Filters
+        let textFilters = [];
+        let lastVideoOutput = '[v_no_text]';
+        if (quotes.length > 0) {
+            // Windows OS အတွက် default font ကိုအသုံးပြုခြင်း
+            const fontPath = 'C:/Windows/Fonts/Arial.ttf';
+            
+            for (let i = 0; i < quotes.length; i++) {
+                const quote = quotes[i].replace(/'/g, `\\\\\\'`); // Escape single quotes
+                const startTime = i * quoteInterval;
+                const endTime = startTime + quoteInterval;
+                const newVideoOutput = `[v_text_${i}]`;
+                
+                textFilters.push(
+                    `${lastVideoOutput}drawtext=` +
+                    `fontfile='${fontPath}':` +
+                    `text='${quote}':` +
+                    `fontsize=42:` +
+                    `fontcolor=white:` +
+                    `x=(w-text_w)/2:` +
+                    `y=h-text_h-80:` +
+                    `box=1:boxcolor=black@0.4:boxborderw=15:` +
+                    `enable='between(t,${startTime},${endTime})'` +
+                    `${newVideoOutput}`
+                );
+                lastVideoOutput = newVideoOutput;
+            }
+        }
+
+        const allImageFilters = [...effectFilters, concatFilter];
+        const combinedFilters = textFilters.length > 0 ? [...allImageFilters, ...textFilters] : allImageFilters;
+        const finalVideoMap = textFilters.length > 0 ? lastVideoOutput : '[v_no_text]';
+
         let filterComplex;
         let outputMaps;
 
-        // Loop လုပ်မည့် video ရှည်အတွက် audio ကို ချောမွေ့စေရန် fade effect ထည့်သွင်းခြင်း
         if (!isShorts) {
             const fadeDuration = 1;
             const fadeStartTime = duration > fadeDuration ? duration - fadeDuration : 0;
-            const audioFilter = `[${n}:a]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
-            filterComplex = [...scaleFilters, concatFilter, audioFilter].join(';');
-            outputMaps = ['-map [outv]', '-map [outa]'];
+            const audioFilter = `[${imagePaths.length}:a]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
+            filterComplex = [...combinedFilters, audioFilter].join(';');
+            outputMaps = [`-map ${finalVideoMap}`, '-map [outa]'];
         } else {
-            filterComplex = [...scaleFilters, concatFilter].join(';');
-            outputMaps = ['-map [outv]', `-map ${n}:a`];
+            filterComplex = combinedFilters.join(';');
+            outputMaps = [`-map ${finalVideoMap}`, `-map ${imagePaths.length}:a`];
         }
 
         ff.complexFilter(filterComplex)
           .outputOptions([
               ...outputMaps,
               '-c:v libx264',
-              '-preset ultrafast',
+              '-preset veryfast',
               '-crf 23',
               '-pix_fmt yuv420p',
               '-c:a aac',
@@ -168,7 +297,7 @@ async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
               '-shortest',
               '-avoid_negative_ts make_zero'
           ])
-          .on('start', cmd => console.log('FFmpeg Render Start'))
+          .on('start', cmd => console.log('FFmpeg Render Start with API Quotes'))
           .on('end', () => resolve(outPath))
           .on('error', (err) => reject(err))
           .save(outPath);
