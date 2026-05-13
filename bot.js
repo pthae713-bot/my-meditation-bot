@@ -75,13 +75,17 @@ async function getMultipleImages(query) {
     } catch (e) { return []; }
 }
 
-// ✅ Fixed: zoompan ဖယ်ပြီး simple scale+crop+concat သုံးထားတယ်
+// ✅ Fix: သီချင်းအရှည်အတိုင်း ပုံများကို တွက်ချက်ပြသပေးသည်
 async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
     const outPath = path.join(__dirname, 'temp', `base_${isShorts ? 's' : 'l'}.mp4`);
     const width  = isShorts ? 1080 : 1920;
     const height = isShorts ? 1920 : 1080;
-    const imgDuration = 12;
+    
+    // သီချင်း duration ကို အတိအကျယူသည်
+    const duration = await getAudioDuration(audioPath);
     const n = imagePaths.length;
+    // ပုံတစ်ပုံချင်းစီ၏ duration ကို သီချင်းအရှည်နှင့် ညှိသည်
+    const imgDuration = duration / n;
 
     return new Promise((resolve, reject) => {
         let ff = ffmpeg();
@@ -91,11 +95,11 @@ async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
         });
         ff.input(audioPath);
 
-        // Scale + crop each image, then concat
         const scaleFilters = imagePaths.map((_, i) =>
             `[${i}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,` +
-            `crop=${width}:${height},setsar=1,fps=25[v${i}]`
+            `crop=${width}:${height},setsar=1,fps=25,format=yuv420p[v${i}]`
         );
+        
         const concatInput  = imagePaths.map((_, i) => `[v${i}]`).join('');
         const concatFilter = `${concatInput}concat=n=${n}:v=1:a=0[outv]`;
         const filterComplex = [...scaleFilters, concatFilter].join(';');
@@ -113,29 +117,28 @@ async function renderSlideshow(audioPath, imagePaths, isShorts = false) {
               '-shortest',
               '-avoid_negative_ts make_zero'
           ])
-          .on('start', cmd => console.log('FFmpeg cmd:', cmd))
-          .on('end', () => {
-              console.log('renderSlideshow done:', outPath);
-              resolve(outPath);
-          })
-          .on('error', (err, stdout, stderr) => {
-              console.error('FFmpeg error:', err.message);
-              console.error('FFmpeg stderr:', stderr);
-              reject(err);
-          })
+          .on('start', cmd => console.log('FFmpeg Render Start'))
+          .on('end', () => resolve(outPath))
+          .on('error', (err) => reject(err))
           .save(outPath);
     });
 }
 
+// ✅ Fix: Loop လုပ်သည့်အခါ ချောမွေ့စေရန် encoding ပြန်လုပ်သည်
 async function loopToOneHour(baseVideoPath, finalName) {
     const outPath = path.join(__dirname, 'output', `${finalName}_long.mp4`);
-    const loopCount = 60;
     const targetDuration = 3600 + Math.floor(Math.random() * 120);
 
     return new Promise((resolve, reject) => {
         ffmpeg(baseVideoPath)
-            .inputOptions([`-stream_loop ${loopCount}`])
-            .outputOptions(['-c copy', `-t ${targetDuration}`])
+            .inputOptions(['-stream_loop -1']) // Target duration ပြည့်အောင် loop ပတ်မည်
+            .outputOptions([
+                '-c:v libx264',
+                '-preset ultrafast',
+                '-c:a aac',
+                `-t ${targetDuration}`,
+                '-pix_fmt yuv420p'
+            ])
             .on('end', () => resolve(outPath))
             .on('error', reject)
             .save(outPath);
@@ -190,16 +193,17 @@ async function processQueue() {
 
     try {
         const imagePaths = await getMultipleImages('nature meditation');
-        if (imagePaths.length === 0) throw new Error("No images fetched from Pexels");
+        if (imagePaths.length === 0) throw new Error("No images fetched");
 
         const thumbPath = await createCanvasThumb(imagePaths[0], title);
 
-        const baseLong   = await renderSlideshow(audioPath, imagePaths, false);
-        const finalLong  = await loopToOneHour(baseLong, title);
-        const longUrl    = await uploadVideo(finalLong, thumbPath, title, false);
+        const baseLong = await renderSlideshow(audioPath, imagePaths, false);
+        const finalLong = await loopToOneHour(baseLong, title);
+        const longUrl = await uploadVideo(finalLong, thumbPath, title, false);
 
+        // Shorts အတွက် duration အမှန်နှင့် render လုပ်သည်
         const finalShorts = await renderSlideshow(audioPath, [imagePaths[0]], true);
-        const shortsUrl   = await uploadVideo(finalShorts, thumbPath, title, true);
+        const shortsUrl = await uploadVideo(finalShorts, thumbPath, title, true);
 
         await bot.telegram.sendMessage(ADMIN_ID,
             `✅ Uploaded!\n🎬 Long: ${longUrl}\n📱 Shorts: ${shortsUrl}`
@@ -215,4 +219,12 @@ async function processQueue() {
 }
 
 // --- START ---
-processQueue();
+(async () => {
+    try {
+        await processQueue();
+        process.exit(0);
+    } catch (e) {
+        console.error(e);
+        process.exit(1);
+    }
+})();
