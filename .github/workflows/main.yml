@@ -40,7 +40,10 @@ jobs:
           cache: 'npm'
 
       - name: Install Node Dependencies
-        run: npm install
+        run: |
+          npm install
+          # Canvas error ကို ပြင်ရန်အတွက် အောက်ပါ line ကို သုံးရပါမယ်
+          npm rebuild canvas --update-binary
 
       - name: Run Workflow
         env:
