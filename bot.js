@@ -290,7 +290,8 @@ async function renderSlideshow(audioPath, speechAudioPath, imagePaths, quote, is
             let audioChain;
             if (speechInput) {
                 // With speech: apply sidechain compression for audio ducking
-                audioChain = `${musicInput}${speechInput}sidechaincompress=threshold=0.1:ratio=10[ducked_music]; [ducked_music]${speechInput}amix=inputs=2[mixed_audio]`;
+                // ✅ Fix: Use 'duration=longest' in amix to prevent premature stream termination
+                audioChain = `${musicInput}${speechInput}sidechaincompress=threshold=0.1:ratio=10[ducked_music]; [ducked_music]${speechInput}amix=inputs=2:duration=longest[mixed_audio]`;
             } else {
                 // Without speech: just use the music
                 audioChain = `${musicInput}acopy[mixed_audio]`;
