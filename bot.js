@@ -289,9 +289,9 @@ async function renderSlideshow(audioPath, speechAudioPath, imagePaths, quote, is
         if (!isShorts) {
             let audioChain;
             if (speechInput) {
-                // With speech: apply sidechain compression for audio ducking
-                // ✅ Fix: Use 'duration=longest' in amix to prevent premature stream termination
-                audioChain = `${musicInput}${speechInput}sidechaincompress=threshold=0.1:ratio=10[ducked_music]; [ducked_music]${speechInput}amix=inputs=2:duration=longest[mixed_audio]`;
+                // With speech: split the speech stream. Use one copy for sidechain control and the other for the final mix.
+                // This prevents the "stream consumed" error in FFmpeg.
+                audioChain = `${speechInput}asplit[sc][sm]; ${musicInput}[sc]sidechaincompress=threshold=0.1:ratio=10[ducked_music]; [ducked_music][sm]amix=inputs=2:duration=longest[mixed_audio]`;
             } else {
                 // Without speech: just use the music
                 audioChain = `${musicInput}acopy[mixed_audio]`;
