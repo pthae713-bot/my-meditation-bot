@@ -7,6 +7,7 @@ const { google } = require('googleapis');
 const axios = require('axios');
 const { createCanvas, loadImage } = require('canvas');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const googleTTS = require('google-tts-api');
 
 const ADMIN_ID = process.env.ADMIN_ID || '2035091217';
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -46,13 +47,22 @@ function saveLastUpdateId(id) {
 async function generateAiContent(songTitle) {
     try {
         const model = genAI.getGenerativeModel({ model: "gemini-1.0-pro" });
-        const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. Provide the output in JSON format with three keys: "youtubeTitle" (an engaging, SEO-friendly title), "inspirationalQuote" (a short, powerful quote, max 150 chars), and "imageKeywords" (a string of 3-4 keywords for Pexels, e.g., "serene forest, calm ocean").
+        const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. Provide the output in JSON format with six keys:
+1. "youtubeTitle": An engaging, SEO-friendly title for a 1-hour meditation video.
+2. "youtubeDescription": A detailed, SEO-friendly description (around 3-4 paragraphs). Include relevant hashtags at the end. IMPORTANT: Conclude the description with the following disclaimer on a new line: 'Disclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience.'
+3. "youtubeTags": An array of 15-20 relevant and effective YouTube tags.
+4. "inspirationalQuote": A unique and thought-provoking quote related to the song's theme (e.g., peace, dawn, rivers). Avoid generic phrases like 'Breathe in, breathe out'. Max 150 chars.
+5. "imageKeywords": A string of 3-4 keywords for Pexels to find background visuals (e.g., "serene forest, calm ocean").
+6. "guidedMeditationScript": A short, soothing guided meditation script (2-3 paragraphs, approx. 100-150 words) that aligns with the video's theme. It should be written in a calm, inviting tone, guiding the listener into a state of relaxation.
 
-Example:
+Example for song title "Whispers of the Dawn":
 {
-  "youtubeTitle": "Find Your Inner Peace | 1-Hour Meditation Journey",
-  "inspirationalQuote": "The quieter you become, the more you can hear.",
-  "imageKeywords": "serene forest, calm ocean, misty mountains"
+  "youtubeTitle": "Whispers of the Dawn | 1-Hour Morning Meditation Music for Positive Energy",
+  "youtubeDescription": "Embrace the new day with 'Whispers of the Dawn,' an hour-long journey of serene and uplifting meditation music...",
+  "youtubeTags": ["morning meditation", "positive energy music", ...],
+  "inspirationalQuote": "With the new day comes new strength and new thoughts.",
+  "imageKeywords": "sunrise, misty forest, gentle stream, dewy leaves",
+  "guidedMeditationScript": "Welcome. Find a comfortable position and gently close your eyes. As the music begins, bring your awareness to your breath... each inhale, a wave of calm... each exhale, a release of tension. Imagine the first light of dawn touching your skin, filling you with warmth and positive energy for the day ahead. Just be here, in this moment of peace."
 }`;
 
         const result = await model.generateContent(prompt);
@@ -71,8 +81,11 @@ Example:
         // Fallback to a simple title if AI fails
         return {
             youtubeTitle: songTitle,
-            inspirationalQuote: "Breathe in, breathe out.",
-            imageKeywords: "nature meditation"
+            youtubeDescription: `Enjoy this beautiful meditation song: ${songTitle}`,
+            youtubeTags: ['meditation', 'relaxing music', songTitle.toLowerCase()],
+            inspirationalQuote: "The journey of a thousand miles begins with a single step.",
+            imageKeywords: "nature meditation",
+            guidedMeditationScript: null
         };
     }
 }
@@ -187,44 +200,9 @@ async function searchAndDownloadImages(query) {
     }
 }
 
-// ✅ Fix: YouTube အတွက် description, tags, comment တို့ကို အလိုအလျောက် ဖန်တီးပေးသည်
-function generateContent(title) {
-    const cleanTitle = title.replace(/[^a-zA-Z0-9\\s]/g, '').trim();
-    const keywords = cleanTitle.split(/\\s+/).filter(w => w.length > 2);
-    const hashtags = keywords.map(k => `#${k.replace(/\\s+/g, '')}`).join(' ');
 
-    const description = `✨ ${cleanTitle} | 1-Hour Relaxing Meditation Music ✨
 
-Immerse yourself in this hour-long session of calming meditation music. Titled "${cleanTitle}", this track is designed to help you find your inner peace, reduce stress, and achieve a state of deep relaxation.
-
-Whether you're looking to meditate, focus on work, study, or simply unwind after a long day, this soothing melody provides the perfect background ambiance.
-
-🌿 This music is perfect for:
-- Deep Meditation
-- Stress and Anxiety Relief
-- Yoga and Pilates Sessions
-- Sleep and Relaxation
-- Studying and Concentration
-- Mindfulness and Healing
-
-🔔 Subscribe for more daily relaxing music!
-
-#Meditation #RelaxingMusic #1Hour #YogaMusic #SleepMusic ${hashtags}`.trim();
-
-    const tags = [
-        'meditation', 'meditation music', 'relaxing music', 'relaxation music',
-        'calm music', 'soothing music', '1 hour meditation music', 'music for meditation',
-        'deep meditation music', 'stress relief music', 'yoga music', 'sleep music',
-        'healing music', 'mindfulness', 'inner peace', 'asmr',
-        ...keywords.map(k => k.toLowerCase())
-    ];
-
-    const pinComment = `Thank you for listening! We hope this music helps you find a moment of peace and tranquility in your day. \nWhat did you feel while listening to \"${cleanTitle}\"? Let us know in the replies! 👇`.trim();
-
-    return { description, tags };
-}
-
-async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
+async function renderSlideshow(audioPath, speechAudioPath, imagePaths, quote, isShorts = false) {
     const outPath = path.join(__dirname, 'temp', `render_${isShorts ? 's' : 'l'}.mp4`);
     const width = isShorts ? 1080 : 1920;
     const height = isShorts ? 1920 : 1080;
@@ -244,6 +222,10 @@ async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
         imagePaths.forEach(img => ff.input(img));
         
         ff.input(audioPath);
+        if (speechAudioPath) {
+            ff.input(speechAudioPath);
+        }
+
         if (isShorts) {
             ff.inputOptions([`-t ${duration}`]); // audio duration ကိုကန့်သတ်
         }
@@ -252,11 +234,14 @@ async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
 
         const effectFilters = imagePaths.map((_, i) => {
             const isZoomIn = Math.random() < 0.5;
-            const startZoom = isZoomIn ? 1.0 : 1.15;
-            const endZoom = isZoomIn ? 1.15 : 1.0;
+            // ✅ Fix: Randomize zoom level for more variety to comply with YouTube policies
+            const zoomAmount = 1.1 + Math.random() * 0.15; // Random zoom between 1.10 and 1.25
+            const startZoom = isZoomIn ? 1.0 : zoomAmount;
+            const endZoom = isZoomIn ? zoomAmount : 1.0;
             const xPan = ['iw/2-(iw/zoom/2)', '0', 'iw-iw/zoom'][Math.floor(Math.random() * 3)];
             const yPan = ['ih/2-(ih/zoom/2)', '0', 'ih-ih/zoom'][Math.floor(Math.random() * 3)];
-            const preScale = 1.2;
+            // Increase pre-scale to avoid black borders with higher zoom
+            const preScale = 1.3;
             
             return `[${i}:v]scale=w=${width}*${preScale}:h=${height}*${preScale}:force_original_aspect_ratio=increase,` +
                    `crop=w=${width}*${preScale}:h=${height}*${preScale},` +
@@ -270,12 +255,23 @@ async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
         
         let textFilter = '';
         if (quote) {
-            // Platform-dependent font path for FFmpeg
-            const fontPath = process.platform === 'win32' 
-                ? 'C\\\\:/Windows/Fonts/Arial.ttf' 
-                : '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
+            // --- Randomize Text Style for Variety ---
+            const fonts = ['Arial', 'Verdana', 'Georgia', 'Times New Roman'];
+            const selectedFont = fonts[Math.floor(Math.random() * fonts.length)];
+            const fontPath = process.platform === 'win32'
+                ? `C\\\\:/Windows/Fonts/${selectedFont}.ttf`
+                : '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'; // Fallback for non-windows
+
+            const fontSize = Math.floor(Math.random() * 16) + 40; // Random size between 40 and 55
+            
+            // Randomize vertical position: 15% from top, middle, or 15% from bottom
+            const yPositions = [`(h*0.15)`, `(h/2-text_h/2)`, `(h-text_h-h*0.15)`];
+            const yPos = yPositions[Math.floor(Math.random() * yPositions.length)];
+
             const escapedQuote = quote.replace(/'/g, `\\\\\\'`).replace(/:/g, `\\\\:`);
-            textFilter = `[v_no_text]drawtext=fontfile='${fontPath}':text='${escapedQuote}':fontsize=42:fontcolor=white:x=(w-text_w)/2:y=h-text_h-80:box=1:boxcolor=black@0.4:boxborderw=15[v_with_text]`;
+
+            // Use a shadow instead of a box for a cleaner, more modern look
+            textFilter = `[v_no_text]drawtext=fontfile='${fontPath}':text='${escapedQuote}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}:shadowcolor=black@0.6:shadowx=2:shadowy=2[v_with_text]`;
         }
 
         const allImageFilters = [...effectFilters, concatFilter];
@@ -285,16 +281,32 @@ async function renderSlideshow(audioPath, imagePaths, quote, isShorts = false) {
 
         let filterComplex;
         let outputMaps;
+        
+        // --- Audio Processing ---
+        const musicInput = `[${n}:a]`;
+        const speechInput = speechAudioPath ? `[${n+1}:a]` : null;
 
         if (!isShorts) {
-            const fadeDuration = 1;
+            let audioChain;
+            if (speechInput) {
+                // With speech: apply sidechain compression for audio ducking
+                audioChain = `${musicInput}${speechInput}sidechaincompress=threshold=0.1:ratio=10[ducked_music]; [ducked_music]${speechInput}amix=inputs=2[mixed_audio]`;
+            } else {
+                // Without speech: just use the music
+                audioChain = `${musicInput}acopy[mixed_audio]`;
+            }
+            
+            // Apply fade in/out to the final mixed audio
+            const fadeDuration = 1.5;
             const fadeStartTime = duration > fadeDuration ? duration - fadeDuration : 0;
-            const audioFilter = `[${n}:a]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
+            const audioFilter = `${audioChain}; [mixed_audio]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
+            
             filterComplex = [...allImageFilters, audioFilter].join(';');
             outputMaps = [`-map ${finalVideoMap}`, '-map [outa]'];
-        } else {
+        
+        } else { // For Shorts
             filterComplex = allImageFilters.join(';');
-            outputMaps = [`-map ${finalVideoMap}`, `-map ${n}:a`];
+            outputMaps = [`-map ${finalVideoMap}`, `-map ${musicInput}`];
         }
 
         ff.complexFilter(filterComplex)
@@ -403,28 +415,47 @@ async function processQueue() {
 
     try {
         // 1. AI content generate လုပ်ခြင်း
-        const { youtubeTitle, inspirationalQuote, imageKeywords } = await generateAiContent(originalTitle);
+        const { youtubeTitle, youtubeDescription, youtubeTags, inspirationalQuote, imageKeywords, guidedMeditationScript } = await generateAiContent(originalTitle);
 
         // 2. AI keywords ဖြင့် image များ ရှာဖွေ ဒေါင်းလုဒ်လုပ်ခြင်း
         const imagePaths = await searchAndDownloadImages(imageKeywords);
         if (imagePaths.length === 0) throw new Error("No images downloaded from Pexels.");
 
-        const { description, tags } = generateContent(youtubeTitle);
+        // 3. Guided Meditation Script မှ အသံဖိုင်ဖန်တီးခြင်း
+        let speechAudioPath = null;
+        if (guidedMeditationScript) {
+            try {
+                console.log("Generating guided meditation audio...");
+                const speechUrl = googleTTS.getAudioUrl(guidedMeditationScript, { lang: 'en', slow: true, host: 'https://translate.google.com' });
+                const speechFilePath = path.join(__dirname, 'temp', 'speech.mp3');
+                const writer = fs.createWriteStream(speechFilePath);
+                const response = await axios({ url: speechUrl, responseType: 'stream' });
+                response.data.pipe(writer);
+                await new Promise((resolve, reject) => {
+                    writer.on('finish', resolve);
+                    writer.on('error', reject);
+                });
+                speechAudioPath = speechFilePath;
+                console.log("Guided meditation audio generated successfully.");
+            } catch (e) {
+                console.warn(`Could not generate speech audio: ${e.message}. Proceeding without guided meditation.`);
+            }
+        }
 
         // --- Long Video ---
         console.log("--- Starting Long Video Process ---");
         const thumbPath = await createCanvasThumb(imagePaths[0], youtubeTitle);
-        const baseLong = await renderSlideshow(audioPath, imagePaths, inspirationalQuote, false);
+        const baseLong = await renderSlideshow(audioPath, speechAudioPath, imagePaths, inspirationalQuote, false);
         const finalLong = await loopToOneHour(baseLong, youtubeTitle);
-        const longVideoData = await uploadVideo(finalLong, thumbPath, youtubeTitle, description, tags, false);
+        const longVideoData = await uploadVideo(finalLong, thumbPath, youtubeTitle, youtubeDescription, youtubeTags, false);
         const longUrl = `https://youtu.be/${longVideoData.id}`;
 
         // --- Shorts Video ---
         console.log("--- Starting Shorts Video Process ---");
         const shortsDesc = `Enjoy a short moment of peace with "${youtubeTitle}". #shorts #meditation #relaxingmusic`;
-        const shortsTags = ['shorts', 'meditation', 'relaxing music', ...tags.slice(0, 5)];
-        // Shorts အတွက် ပုံတစ်ပုံနှင့် quote ကိုသုံးပါ
-        const finalShorts = await renderSlideshow(audioPath, [imagePaths[0]], inspirationalQuote, true);
+        const shortsTags = ['shorts', 'meditation', 'relaxing music', ...youtubeTags.slice(0, 5)];
+        // Shorts အတွက် ပုံတစ်ပုံနှင့် quote ကိုသုံးပါ (စကားပြောမပါ)
+        const finalShorts = await renderSlideshow(audioPath, null, [imagePaths[0]], inspirationalQuote, true);
         const shortsVideoData = await uploadVideo(finalShorts, null, youtubeTitle, shortsDesc, shortsTags, true);
         const shortsUrl = `https://youtu.be/${shortsVideoData.id}`;
 
