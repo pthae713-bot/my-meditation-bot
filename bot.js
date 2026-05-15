@@ -1,53 +1,48 @@
 require('dotenv').config();
-
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { Telegraf } = require('telegraf');
+const fs = require('fs-extra');
+const path = require('path');
+const ffmpeg = require('fluent-ffmpeg');
 const { google } = require('googleapis');
 const axios = require('axios');
-const ffmpeg = require('fluent-ffmpeg');
-const fs = require('fs');
-const path = require('path');
 const { createCanvas, loadImage } = require('canvas');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const googleTTS = require('google-tts-api');
 
-// --- CONFIGURATION & INITIALIZATION ---
-
-// Initialize genAI
+const ADMIN_ID = process.env.ADMIN_ID || '2035091217';
+const bot = new Telegraf(process.env.BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Initialize YouTube
-const youtube = google.youtube({
-    version: 'v3',
-    auth: process.env.YOUTUBE_API_KEY
-});
+const dirs = ['songs', 'images', 'output', 'assets', 'temp'];
+dirs.forEach(dir => fs.ensureDirSync(path.join(__dirname, dir)));
 
-// Initialize Telegraf
-const bot = new Telegraf(process.env.BOT_TOKEN);
+const credentials = require('./credentials.json');
+const token = require('./token.json');
+const oauth2Client = new google.auth.OAuth2(
+    credentials.installed.client_id,
+    credentials.installed.client_secret,
+    credentials.installed.redirect_uris[0]
+);
+oauth2Client.setCredentials(token);
+const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
 
-const UPDATE_ID_FILE = path.join(__dirname, 'last_update_id.txt');
+const LAST_UPDATE_ID_LOG = path.join(__dirname, 'last_update_id.txt');
 
 // --- HELPER FUNCTIONS ---
 
+// နောက်ဆုံး update ID ကို ဖတ်ယူသည်
 function getLastUpdateId() {
-    try {
-        if (fs.existsSync(UPDATE_ID_FILE)) {
-            const content = fs.readFileSync(UPDATE_ID_FILE, 'utf8');
-            return parseInt(content, 10) || 0;
-        }
-    } catch (e) {
-        console.error("Error reading last update ID:", e.message);
-    }
-    return 0;
+    if (!fs.existsSync(LAST_UPDATE_ID_LOG)) {
+        return 0;
+    }
+    const data = fs.readFileSync(LAST_UPDATE_ID_LOG, 'utf8');
+    return parseInt(data, 10) || 0;
 }
 
-function saveLastUpdateId(updateId) {
-    try {
-        fs.writeFileSync(UPDATE_ID_FILE, updateId.toString());
-    } catch (e) {
-        console.error("Error saving last update ID:", e.message);
-    }
+// နောက်ဆုံး update ID ကို မှတ်တမ်းတင်သည်
+function saveLastUpdateId(id) {
+    fs.writeFileSync(LAST_UPDATE_ID_LOG, id.toString());
 }
-
-// --- AI CONTENT GENERATION ---
 
 async function generateAiContent(songTitle) {
     try {
@@ -70,48 +65,48 @@ Example for song title "Whispers of the Dawn":
   "guidedMeditationScript": "Welcome. Find a comfortable position and gently close your eyes. As the music begins, bring your awareness to your breath... each inhale, a wave of calm... each exhale, a release of tension. Imagine the first light of dawn touching your skin, filling you with warmth and positive energy for the day ahead. Just be here, in this moment of peace."
 }`;
 
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        const text = response.text();
-        
-        // ✅ Robust JSON parsing
-        let content;
-        const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
-        
-        if (jsonMatch && jsonMatch[1]) {
-            try {
-                content = JSON.parse(jsonMatch[1]);
-            } catch (parseError) {
-                console.error("Error parsing JSON from Gemini AI:", parseError);
-                console.warn("Raw text from AI:", text);
-                content = null; // Mark as failed
-            }
-        } else {
-            console.warn("Could not extract JSON block from Gemini AI response.");
-            console.warn("Raw text from AI:", text);
-            content = null; // Mark as failed
-        }
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+        
+        // ✅ Robust JSON parsing
+        let content;
+        const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
+        
+        if (jsonMatch && jsonMatch[1]) {
+            try {
+                content = JSON.parse(jsonMatch[1]);
+            } catch (parseError) {
+                console.error("Error parsing JSON from Gemini AI:", parseError);
+                console.warn("Raw text from AI:", text);
+                content = null; // Mark as failed
+            }
+        } else {
+            console.warn("Could not extract JSON block from Gemini AI response.");
+            console.warn("Raw text from AI:", text);
+            content = null; // Mark as failed
+        }
 
-        // If parsing fails, the original catch block will handle the fallback
-        if (!content) {
-            throw new Error("Failed to parse valid JSON from AI response.");
-        }
-        
-        console.log("Gemini AI Content Generated:", content);
-        return content;
+        // If parsing fails, the original catch block will handle the fallback
+        if (!content) {
+            throw new Error("Failed to parse valid JSON from AI response.");
+        }
+        
+        console.log("Gemini AI Content Generated:", content);
+        return content;
 
-    } catch (error) {
-        console.error("Error generating content with Gemini AI:", error);
-        // Fallback to a simple title if AI fails
-        return {
-            youtubeTitle: songTitle,
-            youtubeDescription: `Enjoy this beautiful meditation song: ${songTitle}`,
-            youtubeTags: ['meditation', 'relaxing music', songTitle.toLowerCase()],
-            inspirationalQuote: "The journey of a thousand miles begins with a single step.",
-            imageKeywords: "nature meditation",
-            guidedMeditationScript: null
-        };
-    }
+    } catch (error) {
+        console.error("Error generating content with Gemini AI:", error);
+        // Fallback to a simple title if AI fails
+        return {
+            youtubeTitle: songTitle,
+            youtubeDescription: `Enjoy this beautiful meditation song: ${songTitle}`,
+            youtubeTags: ['meditation', 'relaxing music', songTitle.toLowerCase()],
+            inspirationalQuote: "The journey of a thousand miles begins with a single step.",
+            imageKeywords: "nature meditation",
+            guidedMeditationScript: null
+        };
+    }
 }
 
 
@@ -310,29 +305,30 @@ async function renderSlideshow(audioPath, speechAudioPath, imagePaths, quote, is
         const musicInput = `[${n}:a]`;
         const speechInput = speechAudioPath ? `[${n+1}:a]` : null;
 
-        if (!isShorts) {
-            let audioChain;
-            if (speechInput) {
-                // With speech: split the speech stream. Use one copy for sidechain control and the other for the final mix.
-                // This prevents the "stream consumed" error in FFmpeg.
-                audioChain = `${speechInput}asplit[sc][sm]; ${musicInput}[sc]sidechaincompress=threshold=0.1:ratio=10[ducked_music]; [ducked_music][sm]amix=inputs=2:duration=longest[mixed_audio]`;
-            } else {
-                // Without speech: just use the music
-                audioChain = `${musicInput}acopy[mixed_audio]`;
-            }
-            
-            // Apply fade in/out to the final mixed audio
-            const fadeDuration = 1.5;
-            const fadeStartTime = duration > fadeDuration ? duration - fadeDuration : 0;
-            const audioFilter = `${audioChain}; [mixed_audio]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
-            
-            filterComplex = [...allImageFilters, audioFilter].join(';');
-            outputMaps = [`-map ${finalVideoMap}`, '-map [outa]'];
-        
-        } else { // For Shorts
-            filterComplex = allImageFilters.join(';');
-            outputMaps = [`-map ${finalVideoMap}`, `-map ${n}:a`];
-        }
+        if (!isShorts) {
+            let audioChain;
+            if (speechInput) {
+                // With speech: split the speech stream. Use one copy for sidechain control and the other for the final mix.
+                // This prevents the "stream consumed" error in FFmpeg.
+                audioChain = `${speechInput}asplit[sc][sm]; ${musicInput}[sc]sidechaincompress=threshold=0.1:ratio=10[ducked_music]; [ducked_music][sm]amix=inputs=2:duration=longest[mixed_audio]`;
+            } else {
+                // Without speech: just use the music
+                audioChain = `${musicInput}acopy[mixed_audio]`;
+            }
+            
+            // Apply fade in/out to the final mixed audio
+            const fadeDuration = 1.5;
+            const fadeStartTime = duration > fadeDuration ? duration - fadeDuration : 0;
+            const audioFilter = `${audioChain}; [mixed_audio]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
+            
+            filterComplex = [...allImageFilters, audioFilter].join(';');
+            outputMaps = [`-map ${finalVideoMap}`, '-map [outa]'];
+        
+        } else { // For Shorts
+            filterComplex = allImageFilters.join(';');
+            // For shorts, just map the main music audio. If speech is desired, a more complex mix would be needed.
+            outputMaps = [`-map ${finalVideoMap}`, `-map ${n}:a`];
+        }
 
         ff.complexFilter(filterComplex)
           .outputOptions([
@@ -345,7 +341,7 @@ async function renderSlideshow(audioPath, speechAudioPath, imagePaths, quote, is
               '-b:a 192k',
               '-shortest'
           ])
-          .on('start', () => console.log('FFmpeg Render Start with AI Content'))
+          .on('start', cmd => console.log('FFmpeg Render Start with AI Content'))
           .on('end', () => resolve(outPath))
           .on('error', (err, stdout, stderr) => {
               console.error('Cannot process video: ' + err.message);
@@ -382,35 +378,35 @@ async function loopToOneHour(baseVideoPath, finalName) {
 }
 
 async function uploadVideo(filePath, thumbPath, title, description, tags, isShorts = false) {
-    const snippet = {
-        title: isShorts ? `${title} #shorts #meditation` : `${title} | Relaxing Music`,
-        description: description,
-        tags: isShorts ? ['shorts', 'meditation', ...tags.slice(0, 8)] : tags,
-        categoryId: '10'
-    };
+    const snippet = {
+        title: isShorts ? `${title} #shorts #meditation` : `${title} | Relaxing Music`,
+        description: description,
+        tags: isShorts ? ['shorts', 'meditation', ...tags.slice(0, 8)] : tags,
+        categoryId: '10'
+    };
 
-    const res = await youtube.videos.insert({
-        part: 'snippet,status',
-        requestBody: {
-            snippet: snippet,
-            status: { privacyStatus: 'public' }
-        },
-        media: { body: fs.createReadStream(filePath) }
-    });
+    const res = await youtube.videos.insert({
+        part: 'snippet,status',
+        requestBody: {
+            snippet: snippet,
+            status: { privacyStatus: 'public' }
+        },
+        media: { body: fs.createReadStream(filePath) }
+    });
 
-    if (!isShorts && thumbPath) {
-        try {
-            await youtube.thumbnails.set({
-                videoId: res.data.id,
-                media: { body: fs.createReadStream(thumbPath) }
-            });
-        } catch (thumbError) {
-            console.warn(`⚠️  Thumbnail upload failed for video ID ${res.data.id}: ${thumbError.message}`);
-            console.warn("This is likely a YouTube rate limit. The video is uploaded, but you may need to set the thumbnail manually.");
-            // Don't re-throw the error, just warn the user and continue.
-        }
-    }
-    return res.data;
+    if (!isShorts && thumbPath) {
+        try {
+            await youtube.thumbnails.set({
+                videoId: res.data.id,
+                media: { body: fs.createReadStream(thumbPath) }
+            });
+        } catch (thumbError) {
+            console.warn(`⚠️  Thumbnail upload failed for video ID ${res.data.id}: ${thumbError.message}`);
+            console.warn("This is likely a YouTube rate limit. The video is uploaded, but you may need to set the thumbnail manually.");
+            // Don't re-throw the error, just warn the user and continue.
+        }
+    }
+    return res.data;
 }
 
 
@@ -430,20 +426,13 @@ async function createCanvasThumb(imagePath, title) {
 }
 
 async function processQueue() {
-    await syncTelegramSongs();
-    const songsDir = path.join(__dirname, 'songs');
-    if (!fs.existsSync(songsDir)) {
-        fs.mkdirSync(songsDir, { recursive: true });
-    }
-    const songs = fs.readdirSync(songsDir).filter(f => f.endsWith('.mp3')).sort();
-    if (songs.length === 0) {
-        console.log("No songs to process.");
-        return;
-    }
+    await syncTelegramSongs();
+    const songs = fs.readdirSync('./songs').filter(f => f.endsWith('.mp3')).sort();
+    if (songs.length === 0) return console.log("No songs to process.");
 
-    const currentSong = songs[0];
-    const audioPath = path.join(songsDir, currentSong);
-    const originalTitle = currentSong.replace('.mp3', '').replace(/--/g, '—');
+    const currentSong = songs[0];
+    const audioPath = path.join(__dirname, 'songs', currentSong);
+    const originalTitle = currentSong.replace('.mp3', '').replace(/--/g, '—');
 
     try {
         // 1. AI content generate လုပ်ခြင်း
@@ -514,42 +503,13 @@ async function processQueue() {
     }
 }
 
-// --- MAIN EXECUTION ---
-
-async function startBot() {
-    // Ensure all necessary directories exist
-    const dirs = [
-        path.join(__dirname, 'songs'),
-        path.join(__dirname, 'songs', 'processed'),
-        path.join(__dirname, 'images'),
-        path.join(__dirname, 'temp'),
-        path.join(__dirname, 'output')
-    ];
-
-    dirs.forEach(dir => {
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
-            console.log(`Created directory: ${dir}`);
-        }
-    });
-
-    console.log("Bot is starting...");
-    const chatId = process.env.TELEGRAM_CHAT_ID;
-
-    if (chatId) {
-        try {
-            await bot.telegram.sendMessage(chatId, '✅ Bot has started successfully and is now processing the queue.');
-            console.log(`Startup message sent to chat ID: ${chatId}`);
-        } catch (e) {
-            console.error(`Failed to send startup message to chat ID ${chatId}. Please check if the chat ID is correct and the bot is a member of the chat.`, e.message);
-        }
-    } else {
-        console.warn("TELEGRAM_CHAT_ID is not set in .env file. Skipping startup message.");
-    }
-
-    // Run the queue processor immediately and then every 30 minutes
-    processQueue();
-    setInterval(processQueue, 30 * 60 * 1000);
-}
-
-startBot().catch(e => console.error("Fatal Error:", e));
+// --- START ---
+(async () => {
+    try {
+        await processQueue();
+        // process.exit(0); // Keep the process running for potential future tasks or make it a cron job
+    } catch (e) {
+        console.error("Fatal Error:", e);
+        // process.exit(1);
+    }
+})();
