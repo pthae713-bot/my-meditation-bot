@@ -50,9 +50,9 @@ function saveLastUpdateId(updateId) {
 // --- AI CONTENT GENERATION ---
 
 async function generateAiContent(songTitle) {
-    try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. Provide the output in JSON format with six keys:
+    try {
+        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. Provide the output in JSON format with six keys:
 1. "youtubeTitle": An engaging, SEO-friendly title for a 1-hour meditation video.
 2. "youtubeDescription": A detailed, SEO-friendly description (around 3-4 paragraphs). Include relevant hashtags at the end. IMPORTANT: Conclude the description with the following disclaimer on a new line: 'Disclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience.'
 3. "youtubeTags": An array of 15-20 relevant and effective YouTube tags.
@@ -517,6 +517,22 @@ async function processQueue() {
 // --- MAIN EXECUTION ---
 
 async function startBot() {
+    // Ensure all necessary directories exist
+    const dirs = [
+        path.join(__dirname, 'songs'),
+        path.join(__dirname, 'songs', 'processed'),
+        path.join(__dirname, 'images'),
+        path.join(__dirname, 'temp'),
+        path.join(__dirname, 'output')
+    ];
+
+    dirs.forEach(dir => {
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+            console.log(`Created directory: ${dir}`);
+        }
+    });
+
     console.log("Bot is starting...");
     const chatId = process.env.TELEGRAM_CHAT_ID;
 
