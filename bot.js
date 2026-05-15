@@ -1,52 +1,7 @@
 require('dotenv').config();
-const { Telegraf } = require('telegraf');
-const fs = require('fs-extra');
-const path = require('path');
-const ffmpeg = require('fluent-ffmpeg');
-const { google } = require('googleapis');
-const axios = require('axios');
-const { createCanvas, loadImage } = require('canvas');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-const googleTTS = require('google-tts-api');
-
-const ADMIN_ID = process.env.ADMIN_ID || '2035091217';
-const bot = new Telegraf(process.env.BOT_TOKEN);
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-const dirs = ['songs', 'images', 'output', 'assets', 'temp'];
-dirs.forEach(dir => fs.ensureDirSync(path.join(__dirname, dir)));
-
-const credentials = require('./credentials.json');
-const token = require('./token.json');
-const oauth2Client = new google.auth.OAuth2(
-    credentials.installed.client_id,
-    credentials.installed.client_secret,
-    credentials.installed.redirect_uris[0]
-);
-oauth2Client.setCredentials(token);
-const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-
-const LAST_UPDATE_ID_LOG = path.join(__dirname, 'last_update_id.txt');
-
-// --- HELPER FUNCTIONS ---
-
-// နောက်ဆုံး update ID ကို ဖတ်ယူသည်
-function getLastUpdateId() {
-    if (!fs.existsSync(LAST_UPDATE_ID_LOG)) {
-        return 0;
-    }
-    const data = fs.readFileSync(LAST_UPDATE_ID_LOG, 'utf8');
-    return parseInt(data, 10) || 0;
-}
-
-// နောက်ဆုံး update ID ကို မှတ်တမ်းတင်သည်
-function saveLastUpdateId(id) {
-    fs.writeFileSync(LAST_UPDATE_ID_LOG, id.toString());
-}
-
 async function generateAiContent(songTitle) {
     try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.0-pro" });
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
         const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. Provide the output in JSON format with six keys:
 1. "youtubeTitle": An engaging, SEO-friendly title for a 1-hour meditation video.
 2. "youtubeDescription": A detailed, SEO-friendly description (around 3-4 paragraphs). Include relevant hashtags at the end. IMPORTANT: Conclude the description with the following disclaimer on a new line: 'Disclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience.'
@@ -69,9 +24,28 @@ Example for song title "Whispers of the Dawn":
         const response = await result.response;
         const text = response.text();
         
-        // Extract JSON from the response
-        const jsonString = text.match(/```json\n([\s\S]*?)\n```/)[1];
-        const content = JSON.parse(jsonString);
+        // ✅ Robust JSON parsing
+        let content;
+        const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
+        
+        if (jsonMatch && jsonMatch[1]) {
+            try {
+                content = JSON.parse(jsonMatch[1]);
+            } catch (parseError) {
+                console.error("Error parsing JSON from Gemini AI:", parseError);
+                console.warn("Raw text from AI:", text);
+                content = null; // Mark as failed
+            }
+        } else {
+            console.warn("Could not extract JSON block from Gemini AI response.");
+            console.warn("Raw text from AI:", text);
+            content = null; // Mark as failed
+        }
+
+        // If parsing fails, the original catch block will handle the fallback
+        if (!content) {
+            throw new Error("Failed to parse valid JSON from AI response.");
+        }
         
         console.log("Gemini AI Content Generated:", content);
         return content;
@@ -307,7 +281,7 @@ async function renderSlideshow(audioPath, speechAudioPath, imagePaths, quote, is
         
         } else { // For Shorts
             filterComplex = allImageFilters.join(';');
-            outputMaps = [`-map ${finalVideoMap}`, `-map ${musicInput}`];
+            outputMaps = [`-map ${finalVideoMap}`, `-map ${n}:a`];
         }
 
         ff.complexFilter(filterComplex)
@@ -321,7 +295,7 @@ async function renderSlideshow(audioPath, speechAudioPath, imagePaths, quote, is
               '-b:a 192k',
               '-shortest'
           ])
-          .on('start', cmd => console.log('FFmpeg Render Start with AI Content'))
+          .on('start', () => console.log('FFmpeg Render Start with AI Content'))
           .on('end', () => resolve(outPath))
           .on('error', (err, stdout, stderr) => {
               console.error('Cannot process video: ' + err.message);
