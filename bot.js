@@ -1,4 +1,54 @@
 require('dotenv').config();
+
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { Telegraf } = require('telegraf');
+const { google } = require('googleapis');
+const axios = require('axios');
+const ffmpeg = require('fluent-ffmpeg');
+const fs = require('fs');
+const path = require('path');
+const { createCanvas, loadImage } = require('canvas');
+
+// --- CONFIGURATION & INITIALIZATION ---
+
+// Initialize genAI
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// Initialize YouTube
+const youtube = google.youtube({
+    version: 'v3',
+    auth: process.env.YOUTUBE_API_KEY
+});
+
+// Initialize Telegraf
+const bot = new Telegraf(process.env.BOT_TOKEN);
+
+const UPDATE_ID_FILE = path.join(__dirname, 'last_update_id.txt');
+
+// --- HELPER FUNCTIONS ---
+
+function getLastUpdateId() {
+    try {
+        if (fs.existsSync(UPDATE_ID_FILE)) {
+            const content = fs.readFileSync(UPDATE_ID_FILE, 'utf8');
+            return parseInt(content, 10) || 0;
+        }
+    } catch (e) {
+        console.error("Error reading last update ID:", e.message);
+    }
+    return 0;
+}
+
+function saveLastUpdateId(updateId) {
+    try {
+        fs.writeFileSync(UPDATE_ID_FILE, updateId.toString());
+    } catch (e) {
+        console.error("Error saving last update ID:", e.message);
+    }
+}
+
+// --- AI CONTENT GENERATION ---
+
 async function generateAiContent(songTitle) {
     try {
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
@@ -380,13 +430,20 @@ async function createCanvasThumb(imagePath, title) {
 }
 
 async function processQueue() {
-    await syncTelegramSongs();
-    const songs = fs.readdirSync('./songs').filter(f => f.endsWith('.mp3')).sort();
-    if (songs.length === 0) return console.log("No songs to process.");
+    await syncTelegramSongs();
+    const songsDir = path.join(__dirname, 'songs');
+    if (!fs.existsSync(songsDir)) {
+        fs.mkdirSync(songsDir, { recursive: true });
+    }
+    const songs = fs.readdirSync(songsDir).filter(f => f.endsWith('.mp3')).sort();
+    if (songs.length === 0) {
+        console.log("No songs to process.");
+        return;
+    }
 
-    const currentSong = songs[0];
-    const audioPath = path.join(__dirname, 'songs', currentSong);
-    const originalTitle = currentSong.replace('.mp3', '').replace(/--/g, '—');
+    const currentSong = songs[0];
+    const audioPath = path.join(songsDir, currentSong);
+    const originalTitle = currentSong.replace('.mp3', '').replace(/--/g, '—');
 
     try {
         // 1. AI content generate လုပ်ခြင်း
@@ -457,13 +514,26 @@ async function processQueue() {
     }
 }
 
-// --- START ---
-(async () => {
-    try {
-        await processQueue();
-        // process.exit(0); // Keep the process running for potential future tasks or make it a cron job
-    } catch (e) {
-        console.error("Fatal Error:", e);
-        // process.exit(1);
-    }
-})();
+// --- MAIN EXECUTION ---
+
+async function startBot() {
+    console.log("Bot is starting...");
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+
+    if (chatId) {
+        try {
+            await bot.telegram.sendMessage(chatId, '✅ Bot has started successfully and is now processing the queue.');
+            console.log(`Startup message sent to chat ID: ${chatId}`);
+        } catch (e) {
+            console.error(`Failed to send startup message to chat ID ${chatId}. Please check if the chat ID is correct and the bot is a member of the chat.`, e.message);
+        }
+    } else {
+        console.warn("TELEGRAM_CHAT_ID is not set in .env file. Skipping startup message.");
+    }
+
+    // Run the queue processor immediately and then every 30 minutes
+    processQueue();
+    setInterval(processQueue, 30 * 60 * 1000);
+}
+
+startBot().catch(e => console.error("Fatal Error:", e));
