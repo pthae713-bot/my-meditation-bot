@@ -394,7 +394,12 @@ async function uploadVideo(filePath, thumbPath, title, description, tags, isShor
     const res = await youtube.videos.insert({
         part: 'snippet,status',
         requestBody: {
-            snippet: snippet,
+            snippet: {
+                title: snippet.title,
+                description: snippet.description,
+                tags: snippet.tags,
+                categoryId: snippet.categoryId
+            },
             status: { privacyStatus: 'public' }
         },
         media: { body: fs.createReadStream(filePath) }
