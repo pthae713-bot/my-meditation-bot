@@ -1,115 +1,397 @@
-import dotenv from "dotenv"; 
- import fs from "fs"; 
- import path from "path"; 
- import { generateAudio, loopAudio } from "./src/audioGenerator.js"; 
- import { generateVideoFrame, createLongVideo } from "./src/videoGenerator.js"; 
- import { uploadToYouTube, getAuthClient } from "./src/youtubeUploader.js"; 
- import { generateMetadata } from "./src/metadataGenerator.js"; 
- import { PlaylistManager } from "./src/playlistManager.js"; 
- import { sendSuccess, sendNotification, setupTelegramListener } from "./src/telegramBot.js"; 
- 
- 
- dotenv.config(); 
- 
- 
- const TEMP_DIR = "./temp"; 
- const VIDEO_DURATION = 3660; // 61 minutes 
- 
- 
- // Telegram Listener ကို စတင်နှိုးခြင်း 
- setupTelegramListener(); 
- 
- 
- async function getScheduledTime() { 
-   const now = new Date(); 
-   const scheduled = new Date(); 
-   const currentHour = now.getUTCHours(); 
- 
- 
-   if (currentHour < 12) { 
-     scheduled.setUTCHours(12, 0, 0, 0); // ပထမအသုတ် 
-   } else { 
-     scheduled.setUTCHours(23, 0, 0, 0); // ဒုတိယအသုတ် 
-   } 
- 
- 
-   if (scheduled <= now) { 
-     scheduled.setDate(scheduled.getDate() + 1); 
-   } 
-   return scheduled; 
- } 
- 
- 
- async function main() { 
-   console.log("🚀 YouTube Auto-Upload Bot Starting..."); 
-   const videoCount = parseInt(process.env.VIDEO_COUNT || "0"); 
-   if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true }); 
- 
- 
-   let currentAudioData = null; 
- 
- 
-   try { 
-     const shortAudioPath = path.join(TEMP_DIR, "short_audio.wav"); 
-     currentAudioData = await generateAudio(shortAudioPath); 
-     
-     const metadata = generateMetadata(videoCount); 
-     metadata.title = `${currentAudioData.trackTitle} | Deep Relaxing Piano & Strings`; 
-     
-     await sendNotification(`🎬 Starting video generation...\n🎵 <b>${metadata.title}</b>`); 
- 
- 
-     const longAudioPath = path.join(TEMP_DIR, "long_audio.mp3"); 
-     await loopAudio(currentAudioData.path, longAudioPath, VIDEO_DURATION); 
- 
- 
-     await generateVideoFrame(path.join(TEMP_DIR, "short_video.mp4"), metadata.videoCategory); 
-     const finalVideoPath = path.join(TEMP_DIR, "final_video.mp4"); 
-     await createLongVideo(path.join(TEMP_DIR, "short_video.mp4"), longAudioPath, finalVideoPath, VIDEO_DURATION); 
- 
- 
-     const scheduledTime = await getScheduledTime(); 
-     const { videoId } = await uploadToYouTube(finalVideoPath, metadata, scheduledTime); 
- 
- 
-     const auth = await getAuthClient(); 
-     const playlistManager = new PlaylistManager(auth); 
-     const playlistId = await playlistManager.getOrCreatePlaylist(metadata.playlistName); 
-     await playlistManager.addToPlaylist(playlistId, videoId); 
- 
- 
-     // --- CLEANUP & AUTO-DELETE SECTION --- 
-     console.log("🛠️ Attempting to delete source file..."); 
-     const sourceFile = path.resolve(currentAudioData.originalFile); 
- 
- 
-     await sendSuccess(videoId, metadata.title, scheduledTime, metadata.playlistName); 
- 
- 
-     if (fs.existsSync(TEMP_DIR)) fs.rmSync(TEMP_DIR, { recursive: true, force: true }); 
- 
- 
-     if (fs.existsSync(sourceFile)) { 
-         // File Lock ကင်းအောင် ၃ စက္ကန့်စောင့်ပြီးမှ ဖျက်မယ် 
-         await new Promise(resolve => setTimeout(resolve, 3000)); 
-         fs.unlinkSync(sourceFile); 
-         console.log(`🗑️ Source file deleted: ${sourceFile}`); 
-     } 
- 
- 
-     console.log(`\n🎉 Process Complete! System exiting...`); 
-     process.exit(0); 
- 
- 
-   } catch (error) { 
-     console.error("❌ Error:", error.message); 
-     await sendNotification(`❌ <b>Upload Failed!</b>\nError: ${error.message}`, true); 
-     process.exit(1); 
-   } 
- } 
- 
- 
- main();
+require('dotenv').config();
+const { Telegraf } = require('telegraf');
+const fs = require('fs-extra');
+const path = require('path');
+const ffmpeg = require('fluent-ffmpeg');
+const { google } = require('googleapis');
+const axios = require('axios');
+const { createCanvas, loadImage } = require('canvas');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const googleTTS = require('google-tts-api');
+
+const ADMIN_ID = process.env.ADMIN_ID || '2035091217';
+const bot = new Telegraf(process.env.BOT_TOKEN);
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+const dirs = ['songs', 'images', 'output', 'assets', 'temp'];
+dirs.forEach(dir => fs.ensureDirSync(path.join(__dirname, dir)));
+
+const credentials = require('./credentials.json');
+const token = require('./token.json');
+const oauth2Client = new google.auth.OAuth2(
+    credentials.installed.client_id,
+    credentials.installed.client_secret,
+    credentials.installed.redirect_uris[0]
+);
+oauth2Client.setCredentials(token);
+const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+
+const LAST_UPDATE_ID_LOG = path.join(__dirname, 'last_update_id.txt');
+
+// --- HELPER FUNCTIONS ---
+
+// နောက်ဆုံး update ID ကို ဖတ်ယူသည်
+function getLastUpdateId() {
+    if (!fs.existsSync(LAST_UPDATE_ID_LOG)) {
+        return 0;
+    }
+    const data = fs.readFileSync(LAST_UPDATE_ID_LOG, 'utf8');
+    return parseInt(data, 10) || 0;
+}
+
+// နောက်ဆုံး update ID ကို မှတ်တမ်းတင်သည်
+function saveLastUpdateId(id) {
+    fs.writeFileSync(LAST_UPDATE_ID_LOG, id.toString());
+}
+
+async function generateAiContent(songTitle) {
+    try {
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+        const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. The goal is to create high-quality, unique, and SEO-optimized metadata that complies with YouTube's monetization policies.
+
+Provide the output *only* in a strict JSON format with the following six keys:
+
+1.  "youtubeTitle": A unique, engaging, and SEO-friendly title for a 1-hour meditation video.
+2.  "youtubeDescription": A detailed, well-written, and SEO-friendly description of 3-4 paragraphs. The description MUST end with a list of 5-7 relevant hashtags (e.g., #meditation #relaxingmusic). Crucially, the description MUST also conclude with the following mandatory disclaimer on its own new line: "Disclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience."
+3.  "youtubeTags": An array of 15-20 relevant and effective YouTube tags (not hashtags). These should be keywords people would search for.
+4.  "inspirationalQuote": A unique and thought-provoking quote related to the song's theme. It must be original and not a generic, overused phrase. Maximum 150 characters.
+5.  "imageKeywords": A string of 3-4 descriptive keywords for Pexels to find suitable background visuals (e.g., "serene forest, calm ocean").
+6.  "guidedMeditationScript": A short, soothing guided meditation script (2-3 paragraphs, approx. 100-150 words) that aligns with the video's theme. It should be written in a calm, inviting tone.
+
+HERE IS A PERFECT EXAMPLE for the song title "Whispers of the Dawn":
+\`\`\`json
+{
+  "youtubeTitle": "Whispers of the Dawn | 1-Hour Morning Meditation Music for Positive Energy",
+  "youtubeDescription": "Embrace the new day with 'Whispers of the Dawn,' an hour-long journey of serene and uplifting meditation music designed to awaken your spirit and fill your morning with positivity. Let the gentle melodies wash over you, clearing your mind and setting a peaceful tone for the day ahead. This track is perfect for your morning meditation practice, quiet reflection, or as a calming background for your daily routine.\\n\\nFind your inner peace and start your day centered and refreshed.\\n\\n#MorningMeditation #PositiveEnergy #RelaxingMusic #MeditationMusic #PeacefulMorning\\n\\nDisclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience.",
+  "youtubeTags": ["morning meditation", "positive energy music", "1 hour meditation", "calm music", "peaceful music", "instrumental music", "meditation for focus", "study music", "yoga music", "sleep music", "dawn meditation", "new day meditation", "uplifting music", "background music", "spiritual music"],
+  "inspirationalQuote": "The sun is a daily reminder that we too can rise again from the darkness, that we too can shine our own light.",
+  "imageKeywords": "sunrise, misty forest, gentle stream, dewy leaves",
+  "guidedMeditationScript": "Welcome. Find a comfortable position and gently close your eyes. As the music begins, bring your awareness to your breath... each inhale, a wave of calm... each exhale, a release of tension. Imagine the first light of dawn touching your skin, filling you with warmth and positive energy for the day ahead. Just be here, in this moment of peace."
+}
+\`\`\`
+`;
+
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        const text = response.text();
+        
+        // ✅ Robust JSON parsing
+        let content;
+        const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
+        
+        if (jsonMatch && jsonMatch[1]) {
+            try {
+                content = JSON.parse(jsonMatch[1]);
+            } catch (parseError) {
+                console.error("Error parsing JSON from Gemini AI:", parseError);
+                console.warn("Raw text from AI:", text);
+                content = null; // Mark as failed
+            }
+        } else {
+            console.warn("Could not extract JSON block from Gemini AI response.");
+            console.warn("Raw text from AI:", text);
+            content = null; // Mark as failed
+        }
+
+        // If parsing fails, the original catch block will handle the fallback
+        if (!content) {
+            throw new Error("Failed to parse valid JSON from AI response.");
+        }
+        
+        console.log("Gemini AI Content Generated:", content);
+        return content;
+
+    } catch (error) {
+        console.error("Error generating content with Gemini AI:", error);
+        // Fallback to a simple title if AI fails
+        return {
+            youtubeTitle: songTitle,
+            youtubeDescription: `Enjoy this beautiful meditation song: ${songTitle}`,
+            youtubeTags: ['meditation', 'relaxing music', songTitle.toLowerCase()],
+            inspirationalQuote: "The journey of a thousand miles begins with a single step.",
+            imageKeywords: "nature meditation",
+            guidedMeditationScript: null
+        };
+    }
+}
+
+
+// --- MAIN FUNCTIONS ---
+
+async function syncTelegramSongs() {
+    try {
+        const lastUpdateId = getLastUpdateId();
+        const updates = await bot.telegram.getUpdates(lastUpdateId + 1, 100, 0);
+
+        if (updates.length === 0) {
+            console.log("No new songs from Telegram.");
+            return;
+        }
+
+        let newMaxUpdateId = lastUpdateId;
+        const downloadPromises = [];
+
+        for (const update of updates) {
+            newMaxUpdateId = Math.max(newMaxUpdateId, update.update_id);
+
+            if (update.message && update.message.audio) {
+                const audio = update.message.audio;
+                const fileName = audio.file_name || `track_${Date.now()}.mp3`;
+
+                const localPath = path.join(__dirname, 'songs', fileName);
+                const processedPath = path.join(__dirname, 'songs', 'processed', fileName);
+
+                if (!fs.existsSync(localPath) && !fs.existsSync(processedPath)) {
+                    // ဒေါင်းလုဒ် promise တစ်ခု ဖန်တီးပြီး စာရင်းထဲထည့်သည်
+                    const downloadPromise = (async () => {
+                        try {
+                            const fileLink = await bot.telegram.getFileLink(audio.file_id);
+                            const response = await axios({ url: fileLink.href, responseType: 'stream' });
+                            const writer = fs.createWriteStream(localPath);
+                            response.data.pipe(writer);
+                            await new Promise((resolve, reject) => {
+                                writer.on('finish', resolve);
+                                writer.on('error', reject);
+                            });
+                            console.log(`Downloaded new song: ${fileName}`);
+                        } catch (downloadError) {
+                            console.error(`Failed to download ${fileName}:`, downloadError.message);
+                        }
+                    })();
+                    downloadPromises.push(downloadPromise);
+                }
+            }
+        }
+
+        // ဒေါင်းလုဒ် promise အားလုံးကို တစ်ပြိုင်နက်တည်း run သည်
+        if (downloadPromises.length > 0) {
+            console.log(`Starting download of ${downloadPromises.length} new song(s)...`);
+            await Promise.all(downloadPromises);
+            console.log("All new songs downloaded.");
+        }
+
+        // စစ်ဆေးပြီးသမျှထဲက အကြီးဆုံး update ID ကို မှတ်တမ်းတင်သည်
+        if (newMaxUpdateId > lastUpdateId) {
+            saveLastUpdateId(newMaxUpdateId);
+            console.log(`Saved last update ID: ${newMaxUpdateId}`);
+        }
+
+    } catch (e) { console.log("Sync Error:", e.message); }
+}
+
+async function getAudioDuration(filePath) {
+    return new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(filePath, (err, metadata) => {
+            if (err) reject(err);
+            resolve(metadata.format.duration);
+        });
+    });
+}
+
+async function searchAndDownloadImages(query) {
+    try {
+        const randomPage = Math.floor(Math.random() * 20) + 1;
+        const res = await axios.get(
+            `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=landscape&per_page=5&page=${randomPage}`,
+            { headers: { 'Authorization': process.env.PEXELS_KEY } }
+        );
+
+        if (!res.data.photos || res.data.photos.length === 0) {
+            console.warn(`No images found for query: "${query}". Falling back to "nature".`);
+            return searchAndDownloadImages("nature");
+        }
+
+        const urls = res.data.photos.map(p => p.src.large2x);
+        const downloadPromises = urls.map((url, i) => {
+            const imagePath = path.join(__dirname, 'images', `bg_${i}.jpg`);
+            return (async () => {
+                const writer = fs.createWriteStream(imagePath);
+                const response = await axios({ url, responseType: 'stream' });
+                response.data.pipe(writer);
+                await new Promise((resolve, reject) => {
+                    writer.on('finish', resolve);
+                    writer.on('error', reject);
+                });
+                return imagePath;
+            })();
+        });
+        
+        const paths = await Promise.all(downloadPromises);
+        console.log(`Successfully downloaded ${paths.length} images for query "${query}".`);
+        return paths;
+    } catch (e) {
+        console.error("Error fetching from Pexels:", e.message);
+        return [];
+    }
+}
+
+
+
+async function renderSlideshow(audioPath, speechAudioPath, imagePaths, quote, isShorts = false) {
+    const outPath = path.join(__dirname, 'temp', `render_${isShorts ? 's' : 'l'}.mp4`);
+    const width = isShorts ? 1080 : 1920;
+    const height = isShorts ? 1920 : 1080;
+
+    let duration = await getAudioDuration(audioPath);
+    if (isShorts && duration > 63) {
+        duration = 63; // Shorts ကို စက္ကန့် 60 သတ်မှတ်
+    }
+    
+    const n = imagePaths.length;
+    if (n === 0) return Promise.reject(new Error("No images provided for slideshow."));
+    const imgDuration = duration / n;
+
+    return new Promise((resolve, reject) => {
+        let ff = ffmpeg();
+
+        imagePaths.forEach(img => ff.input(img));
+        
+        ff.input(audioPath);
+        if (speechAudioPath) {
+            ff.input(speechAudioPath);
+        }
+
+        if (isShorts) {
+            ff.inputOptions([`-t ${duration}`]); // audio duration ကိုကန့်သတ်
+        }
+
+        const finalFps = 25;
+
+        const effectFilters = imagePaths.map((_, i) => {
+            const isZoomIn = Math.random() < 0.5;
+            // ✅ Fix: Randomize zoom level for more variety to comply with YouTube policies
+            const zoomAmount = 1.1 + Math.random() * 0.15; // Random zoom between 1.10 and 1.25
+            const startZoom = isZoomIn ? 1.0 : zoomAmount;
+            const endZoom = isZoomIn ? zoomAmount : 1.0;
+            const xPan = ['iw/2-(iw/zoom/2)', '0', 'iw-iw/zoom'][Math.floor(Math.random() * 3)];
+            const yPan = ['ih/2-(ih/zoom/2)', '0', 'ih-ih/zoom'][Math.floor(Math.random() * 3)];
+            // Increase pre-scale to avoid black borders with higher zoom
+            const preScale = 1.3;
+            
+            return `[${i}:v]scale=w=${width}*${preScale}:h=${height}*${preScale}:force_original_aspect_ratio=increase,` +
+                   `crop=w=${width}*${preScale}:h=${height}*${preScale},` +
+                   `zoompan=z='on*(${endZoom}-${startZoom})/(${imgDuration * finalFps})+${startZoom}':` +
+                   `x='${xPan}':y='${yPan}':d=${Math.ceil(imgDuration * finalFps)}:` +
+                   `s=${width}x${height}:fps=${finalFps},setsar=1[v${i}]`;
+        });
+        
+        const concatInput = imagePaths.map((_, i) => `[v${i}]`).join('');
+        const concatFilter = `${concatInput}concat=n=${n}:v=1:a=0[v_no_text]`;
+        
+        let textFilter = '';
+        if (quote) {
+            // --- Randomize Text Style for Variety ---
+            const fonts = ['Arial', 'Verdana', 'Georgia', 'Times New Roman'];
+            const selectedFont = fonts[Math.floor(Math.random() * fonts.length)];
+            const fontPath = process.platform === 'win32'
+                ? `C\\\\:/Windows/Fonts/${selectedFont}.ttf`
+                : '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'; // Fallback for non-windows
+
+            const fontSize = Math.floor(Math.random() * 16) + 40; // Random size between 40 and 55
+            
+            // Randomize vertical position: 15% from top, middle, or 15% from bottom
+            const yPositions = [`(h*0.15)`, `(h/2-text_h/2)`, `(h-text_h-h*0.15)`];
+            const yPos = yPositions[Math.floor(Math.random() * yPositions.length)];
+
+            const escapedQuote = quote.replace(/'/g, `\\\\\\'`).replace(/:/g, `\\\\:`);
+
+            // Use a shadow instead of a box for a cleaner, more modern look
+            textFilter = `[v_no_text]drawtext=fontfile='${fontPath}':text='${escapedQuote}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}:shadowcolor=black@0.6:shadowx=2:shadowy=2[v_with_text]`;
+        }
+
+        const allImageFilters = [...effectFilters, concatFilter];
+        if (textFilter) allImageFilters.push(textFilter);
+
+        const finalVideoMap = textFilter ? '[v_with_text]' : '[v_no_text]';
+
+        let filterComplex;
+        let outputMaps;
+        
+        // --- Audio Processing ---
+        const musicInput = `[${n}:a]`;
+        const speechInput = speechAudioPath ? `[${n+1}:a]` : null;
+
+        if (!isShorts) {
+            let audioChain;
+            if (speechInput) {
+                // With speech: split the speech stream. Use one copy for sidechain control and the other for the final mix.
+                // This prevents the "stream consumed" error in FFmpeg.
+                audioChain = `${speechInput}asplit[sc][sm]; ${musicInput}[sc]sidechaincompress=threshold=0.1:ratio=10[ducked_music]; [ducked_music][sm]amix=inputs=2:duration=longest[mixed_audio]`;
+            } else {
+                // Without speech: just use the music
+                audioChain = `${musicInput}acopy[mixed_audio]`;
+            }
+            
+            // Apply fade in/out to the final mixed audio
+            const fadeDuration = 1.5;
+            const fadeStartTime = duration > fadeDuration ? duration - fadeDuration : 0;
+            const audioFilter = `${audioChain}; [mixed_audio]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
+            
+            filterComplex = [...allImageFilters, audioFilter].join(';');
+            outputMaps = [`-map ${finalVideoMap}`, '-map [outa]'];
+        
+        } else { // For Shorts
+            filterComplex = allImageFilters.join(';');
+            // For shorts, just map the main music audio. If speech is desired, a more complex mix would be needed.
+            outputMaps = [`-map ${finalVideoMap}`, `-map ${n}:a`];
+        }
+
+        ff.complexFilter(filterComplex)
+          .outputOptions([
+              ...outputMaps,
+              '-c:v libx264',
+              '-preset veryfast',
+              '-crf 23',
+              '-pix_fmt yuv420p',
+              '-c:a aac',
+              '-b:a 192k',
+              '-shortest'
+          ])
+          .on('start', cmd => console.log('FFmpeg Render Start with AI Content'))
+          .on('end', () => resolve(outPath))
+          .on('error', (err, stdout, stderr) => {
+              console.error('Cannot process video: ' + err.message);
+              console.error('ffmpeg stderr:\n' + stderr);
+              reject(new Error('FFmpeg failed during render. Check logs.'));
+          })
+          .save(outPath);
+    });
+}
+
+// Base video ကို တစ်နာရီကျော်ကြာအောင် ချောမွေ့စွာ loop ပြုလုပ်သည်
+async function loopToOneHour(baseVideoPath, finalName) {
+    const outPath = path.join(__dirname, 'output', `${finalName}_long.mp4`);
+    const targetDuration = 3600 + Math.floor(Math.random() * 120);
+
+    return new Promise((resolve, reject) => {
+        ffmpeg(baseVideoPath)
+            .inputOptions(['-stream_loop -1']) // Target duration ပြည့်အောင် loop ပတ်မည်
+            .outputOptions([
+                '-c:v libx264',
+                '-preset ultrafast',
+                '-c:a aac',
+                `-t ${targetDuration}`,
+                '-pix_fmt yuv420p'
+            ])
+            .on('end', () => resolve(outPath))
+            .on('error', (err, stdout, stderr) => {
+                console.error('Cannot loop video: ' + err.message);
+                console.error('ffmpeg stderr:\n' + stderr);
+                reject(new Error('FFmpeg failed during loop. Check logs.'));
+            })
+            .save(outPath);
+    });
+}
+
+async function uploadVideo(filePath, thumbPath, title, description, tags, isShorts = false) {
+    const snippet = {
+        title: isShorts ? `${title} #shorts #meditation` : `${title} | Relaxing Music`,
+        description: description,
+        tags: tags, // <-- ဒီနေရာမှာ tags ကို ထည့်သွင်းပါမယ်။
+        categoryId: '10', // Music category, or another relevant one
+        defaultLanguage: 'en',
+        defaultAudioLanguage: 'en'
+    };
         tags: isShorts ? ['shorts', 'meditation', ...tags.slice(0, 8)] : tags,
         categoryId: '10'
     };
