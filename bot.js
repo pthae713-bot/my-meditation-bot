@@ -384,45 +384,44 @@ async function loopToOneHour(baseVideoPath, finalName) {
 }
 
 async function uploadVideo(filePath, thumbPath, title, description, tags, isShorts = false) {
-    const snippet = {
+    const snippet = {
         title: isShorts ? `${title} #shorts #meditation` : `${title} | Relaxing Music`,
         description: description,
-        tags: tags, // <-- ဒီနေရာမှာ tags ကို ထည့်သွင်းပါမယ်။
-        categoryId: '10', // Music category, or another relevant one
+        tags: tags,
+        categoryId: '10', // Music category
         defaultLanguage: 'en',
         defaultAudioLanguage: 'en'
     };
-        tags: isShorts ? ['shorts', 'meditation', ...tags.slice(0, 8)] : tags,
-        categoryId: '10'
-    };
 
-    const res = await youtube.videos.insert({
-        part: 'snippet,status',
-        requestBody: {
-            snippet: {
+    const res = await youtube.videos.insert({
+        part: 'snippet,status',
+        requestBody: {
+            snippet: {
                 title: snippet.title,
                 description: snippet.description,
                 tags: snippet.tags,
-                categoryId: snippet.categoryId
+                categoryId: snippet.categoryId,
+                defaultLanguage: snippet.defaultLanguage,
+                defaultAudioLanguage: snippet.defaultAudioLanguage
             },
-            status: { privacyStatus: 'public' }
-        },
-        media: { body: fs.createReadStream(filePath) }
-    });
+            status: { privacyStatus: 'public' }
+        },
+        media: { body: fs.createReadStream(filePath) }
+    });
 
-    if (!isShorts && thumbPath) {
-        try {
-            await youtube.thumbnails.set({
-                videoId: res.data.id,
-                media: { body: fs.createReadStream(thumbPath) }
-            });
-        } catch (thumbError) {
-            console.warn(`⚠️  Thumbnail upload failed for video ID ${res.data.id}: ${thumbError.message}`);
-            console.warn("This is likely a YouTube rate limit. The video is uploaded, but you may need to set the thumbnail manually.");
-            // Don't re-throw the error, just warn the user and continue.
-        }
-    }
-    return res.data;
+    if (!isShorts && thumbPath) {
+        try {
+            await youtube.thumbnails.set({
+                videoId: res.data.id,
+                media: { body: fs.createReadStream(thumbPath) }
+            });
+        } catch (thumbError) {
+            console.warn(`⚠️  Thumbnail upload failed for video ID ${res.data.id}: ${thumbError.message}`);
+            console.warn("This is likely a YouTube rate limit. The video is uploaded, but you may need to set the thumbnail manually.");
+            // Don't re-throw the error, just warn the user and continue.
+        }
+    }
+    return res.data;
 }
 
 
