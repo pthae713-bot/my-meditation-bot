@@ -52,7 +52,7 @@ async function generateAiContent(songTitle) {
 Provide the output *only* in a strict JSON format with the following six keys:
 
 1.  "youtubeTitle": A unique, engaging, and SEO-friendly title for a 1-hour meditation video.
-2.  "youtubeDescription": A detailed, well-written, and SEO-friendly description of 3-4 paragraphs. The description MUST end with a list of 5-7 relevant hashtags (e.g., #meditation #relaxingmusic). Crucially, the description MUST also conclude with the following mandatory disclaimer on its own new line: "Disclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience."
+2.  "youtubeDescription": A detailed, well-written, and SEO-friendly description of 5-7 paragraphs. The description MUST end with a list of 5-7 relevant hashtags (e.g., #meditation #relaxingmusic). Crucially, the description MUST also conclude with the following mandatory disclaimer on its own new line: "Disclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience."
 3.  "youtubeTags": An array of 15-20 relevant and effective YouTube tags (not hashtags). These should be keywords people would search for.
 4.  "inspirationalQuote": A unique and thought-provoking quote related to the song's theme. It must be original and not a generic, overused phrase. Maximum 150 characters.
 5.  "imageKeywords": A string of 3-4 descriptive keywords for Pexels to find suitable background visuals (e.g., "serene forest, calm ocean").
@@ -488,7 +488,7 @@ async function processQueue() {
 
         // --- Shorts Video ---
         console.log("--- Starting Shorts Video Process ---");
-        const shortsDesc = `Enjoy a short moment of peace with "${youtubeTitle}". #shorts #meditation #relaxingmusic`;
+        const shortsDesc = youtubeDescription; // Use the full AI-generated description
         const shortsTags = ['shorts', 'meditation', 'relaxing music', ...youtubeTags.slice(0, 5)];
         // Shorts အတွက် ပုံတစ်ပုံနှင့် quote ကိုသုံးပါ (စကားပြောမပါ)
         const finalShorts = await renderSlideshow(audioPath, null, [imagePaths[0]], inspirationalQuote, true);
