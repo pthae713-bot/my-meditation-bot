@@ -10,6 +10,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const googleTTS = require('google-tts-api');
 
 const ADMIN_ID = process.env.ADMIN_ID || '2035091217';
+const CHANNEL_NAME = process.env.CHANNEL_NAME || 'Moonlit Harmony'; // User provided channel name
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -47,12 +48,25 @@ function saveLastUpdateId(id) {
 async function generateAiContent(songTitle) {
     try {
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+
+        // Calculate dynamic date for description
+        const today = new Date();
+        const options = { year: 'numeric', month: 'long', day: 'numeric' };
+        const formattedDate = today.toLocaleDateString('en-US', options);
+
         const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. The goal is to create high-quality, unique, and SEO-optimized metadata that complies with YouTube's monetization policies.
 
 Provide the output *only* in a strict JSON format with the following six keys:
 
 1.  "youtubeTitle": A unique, engaging, and SEO-friendly title for a 1-hour meditation video.
-2.  "youtubeDescription": A detailed, well-written, and SEO-friendly description of 5-7 paragraphs. The description MUST end with a list of 5-7 relevant hashtags (e.g., #meditation #relaxingmusic). Crucially, the description MUST also conclude with the following mandatory disclaimer on its own new line: "Disclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience."
+2.  "youtubeDescription": A detailed, well-written, and SEO-friendly description that follows this structure:
+    - An opening paragraph introducing the music and its primary benefit (e.g., sleep, relaxation, focus).
+    - A "Why This Works" section with 3-4 bullet points explaining the unique qualities of the music.
+    - A "Tips for Best Experience" section with 3-4 bullet points for optimal listening.
+    - A "Call to Action" encouraging likes and subscriptions.
+    - A list of 5-7 relevant hashtags (e.g., #meditation #relaxingmusic).
+    - The description MUST conclude with the following mandatory disclaimer on its own new line: "Disclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience."
+    - The description MUST also include "📅 Published: ${formattedDate}" and "© ${CHANNEL_NAME}" at the very end, each on its own new line.
 3.  "youtubeTags": An array of 15-20 relevant and effective YouTube tags (not hashtags). These should be keywords people would search for.
 4.  "inspirationalQuote": A unique and thought-provoking quote related to the song's theme. It must be original and not a generic, overused phrase. Maximum 150 characters.
 5.  "imageKeywords": A string of 3-4 descriptive keywords for Pexels to find suitable background visuals (e.g., "serene forest, calm ocean").
@@ -62,7 +76,7 @@ HERE IS A PERFECT EXAMPLE for the song title "Whispers of the Dawn":
 \`\`\`json
 {
   "youtubeTitle": "Whispers of the Dawn | 1-Hour Morning Meditation Music for Positive Energy",
-  "youtubeDescription": "Embrace the new day with 'Whispers of the Dawn,' an hour-long journey of serene and uplifting meditation music designed to awaken your spirit and fill your morning with positivity. Let the gentle melodies wash over you, clearing your mind and setting a peaceful tone for the day ahead. This track is perfect for your morning meditation practice, quiet reflection, or as a calming background for your daily routine.\\n\\nFind your inner peace and start your day centered and refreshed.\\n\\n#MorningMeditation #PositiveEnergy #RelaxingMusic #MeditationMusic #PeacefulMorning\\n\\nDisclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience.",
+  "youtubeDescription": "😴 Struggling to sleep? Let this peaceful music guide you into deep, restorative sleep. Perfect for bedtime relaxation and stress relief.\\n\\n🌟 Why This Works:\\n• Specially composed calming frequencies\\n• Gentle melodies that slow brainwaves\\n• No jarring sounds or sudden changes\\n• Continuous loop for all-night use\\n\\n🎧 Tips for Best Experience:\\n• Use headphones or speakers at low volume\\n• Dim your lights 30 minutes before bed\\n• Practice deep breathing as music plays\\n\\n👍 If this helped you sleep, please LIKE and SUBSCRIBE!\\n\\n#DeepSleepMusic #SleepAid #CalmMusic\\n\\nDisclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience.\\n📅 Published: ${formattedDate}\\n© ${CHANNEL_NAME}",
   "youtubeTags": ["morning meditation", "positive energy music", "1 hour meditation", "calm music", "peaceful music", "instrumental music", "meditation for focus", "study music", "yoga music", "sleep music", "dawn meditation", "new day meditation", "uplifting music", "background music", "spiritual music"],
   "inspirationalQuote": "The sun is a daily reminder that we too can rise again from the darkness, that we too can shine our own light.",
   "imageKeywords": "sunrise, misty forest, gentle stream, dewy leaves",
