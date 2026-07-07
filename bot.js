@@ -6,8 +6,10 @@ const ffmpeg = require('fluent-ffmpeg');
 const { google } = require('googleapis');
 const axios = require('axios');
 const { createCanvas, loadImage } = require('canvas');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-const googleTTS = require('google-tts-api');
+const { generateLongTTS } = require('./src/utils');
+const { renderSlideshow, loopToOneHour } = require('./src/video_engine');
+const { uploadToYouTube } = require('./src/youtube_uploader');
+const { generateAiContent } = require('./src/ai_engine');
 
 const ADMIN_ID = process.env.ADMIN_ID || '2035091217';
 const CHANNEL_NAME = process.env.CHANNEL_NAME || 'Moonlit Harmony'; // User provided channel name
@@ -45,89 +47,7 @@ function saveLastUpdateId(id) {
     fs.writeFileSync(LAST_UPDATE_ID_LOG, id.toString());
 }
 
-async function generateAiContent(songTitle) {
-    try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
-
-        // Calculate dynamic date for description
-        const today = new Date();
-        const options = { year: 'numeric', month: 'long', day: 'numeric' };
-        const formattedDate = today.toLocaleDateString('en-US', options);
-
-        const prompt = `Based on the song title "${songTitle}", generate content for a YouTube meditation video. The goal is to create high-quality, unique, and SEO-optimized metadata that complies with YouTube's monetization policies.
-
-Provide the output *only* in a strict JSON format with the following six keys:
-
-1.  "youtubeTitle": A unique, engaging, and SEO-friendly title for a 1-hour meditation video.
-2.  "youtubeDescription": A detailed, well-written, and SEO-friendly description that follows this structure:
-    - An opening paragraph introducing the music and its primary benefit (e.g., sleep, relaxation, focus).
-    - A "Why This Works" section with 3-4 bullet points explaining the unique qualities of the music.
-    - A "Tips for Best Experience" section with 3-4 bullet points for optimal listening.
-    - A "Call to Action" encouraging likes and subscriptions.
-    - A list of 5-7 relevant hashtags (e.g., #meditation #relaxingmusic).
-    - The description MUST conclude with the following mandatory disclaimer on its own new line: "Disclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience."
-    - The description MUST also include "📅 Published: ${formattedDate}" and "© ${CHANNEL_NAME}" at the very end, each on its own new line.
-3.  "youtubeTags": An array of 15-20 relevant and effective YouTube tags (not hashtags). These should be keywords people would search for.
-4.  "inspirationalQuote": A unique and thought-provoking quote related to the song's theme. It must be original and not a generic, overused phrase. Maximum 150 characters.
-5.  "imageKeywords": A string of 3-4 descriptive keywords for Pexels to find suitable background visuals (e.g., "serene forest, calm ocean").
-6.  "guidedMeditationScript": A short, soothing guided meditation script (2-3 paragraphs, approx. 100-150 words) that aligns with the video's theme. It should be written in a calm, inviting tone.
-
-HERE IS A PERFECT EXAMPLE for the song title "Whispers of the Dawn":
-\`\`\`json
-{
-  "youtubeTitle": "Whispers of the Dawn | 1-Hour Morning Meditation Music for Positive Energy",
-  "youtubeDescription": "😴 Struggling to sleep? Let this peaceful music guide you into deep, restorative sleep. Perfect for bedtime relaxation and stress relief.\\n\\n🌟 Why This Works:\\n• Specially composed calming frequencies\\n• Gentle melodies that slow brainwaves\\n• No jarring sounds or sudden changes\\n• Continuous loop for all-night use\\n\\n🎧 Tips for Best Experience:\\n• Use headphones or speakers at low volume\\n• Dim your lights 30 minutes before bed\\n• Practice deep breathing as music plays\\n\\n👍 If this helped you sleep, please LIKE and SUBSCRIBE!\\n\\n#DeepSleepMusic #SleepAid #CalmMusic\\n\\nDisclosure: This video, including its audio-visual elements and descriptive text, was created with the assistance of generative AI technologies to provide a unique and immersive experience.\\n📅 Published: ${formattedDate}\\n© ${CHANNEL_NAME}",
-  "youtubeTags": ["morning meditation", "positive energy music", "1 hour meditation", "calm music", "peaceful music", "instrumental music", "meditation for focus", "study music", "yoga music", "sleep music", "dawn meditation", "new day meditation", "uplifting music", "background music", "spiritual music"],
-  "inspirationalQuote": "The sun is a daily reminder that we too can rise again from the darkness, that we too can shine our own light.",
-  "imageKeywords": "sunrise, misty forest, gentle stream, dewy leaves",
-  "guidedMeditationScript": "Welcome. Find a comfortable position and gently close your eyes. As the music begins, bring your awareness to your breath... each inhale, a wave of calm... each exhale, a release of tension. Imagine the first light of dawn touching your skin, filling you with warmth and positive energy for the day ahead. Just be here, in this moment of peace."
-}
-\`\`\`
-`;
-
-        const result = await model.generateContent(prompt);
-        const response = await result.response;
-        const text = response.text();
-        
-        // ✅ Robust JSON parsing
-        let content;
-        const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/);
-        
-        if (jsonMatch && jsonMatch[1]) {
-            try {
-                content = JSON.parse(jsonMatch[1]);
-            } catch (parseError) {
-                console.error("Error parsing JSON from Gemini AI:", parseError);
-                console.warn("Raw text from AI:", text);
-                content = null; // Mark as failed
-            }
-        } else {
-            console.warn("Could not extract JSON block from Gemini AI response.");
-            console.warn("Raw text from AI:", text);
-            content = null; // Mark as failed
-        }
-
-        // If parsing fails, the original catch block will handle the fallback
-        if (!content) {
-            throw new Error("Failed to parse valid JSON from AI response.");
-        }
-        
-        console.log("Gemini AI Content Generated:", content);
-        return content;
-
-    } catch (error) {
-        console.error("Error generating content with Gemini AI:", error);
-        // Fallback to a simple title if AI fails
-        return {
-            youtubeTitle: songTitle,
-            youtubeDescription: `Enjoy this beautiful meditation song: ${songTitle}`,
-            youtubeTags: ['meditation', 'relaxing music', songTitle.toLowerCase()],
-            inspirationalQuote: "The journey of a thousand miles begins with a single step.",
-            imageKeywords: "nature meditation",
-            guidedMeditationScript: null
-        };
-    }
-}
+// AI Content logic moved to src/ai_engine.js
 
 
 // --- MAIN FUNCTIONS ---
@@ -241,202 +161,7 @@ async function searchAndDownloadImages(query) {
 
 
 
-async function renderSlideshow(audioPath, speechAudioPath, imagePaths, quote, isShorts = false) {
-    const outPath = path.join(__dirname, 'temp', `render_${isShorts ? 's' : 'l'}.mp4`);
-    const width = isShorts ? 1080 : 1920;
-    const height = isShorts ? 1920 : 1080;
-
-    let duration = await getAudioDuration(audioPath);
-    if (isShorts && duration > 63) {
-        duration = 63; // Shorts ကို စက္ကန့် 60 သတ်မှတ်
-    }
-    
-    const n = imagePaths.length;
-    if (n === 0) return Promise.reject(new Error("No images provided for slideshow."));
-    const imgDuration = duration / n;
-
-    return new Promise((resolve, reject) => {
-        let ff = ffmpeg();
-
-        imagePaths.forEach(img => ff.input(img));
-        
-        ff.input(audioPath);
-        if (speechAudioPath) {
-            ff.input(speechAudioPath);
-        }
-
-        if (isShorts) {
-            ff.inputOptions([`-t ${duration}`]); // audio duration ကိုကန့်သတ်
-        }
-
-        const finalFps = 25;
-
-        const effectFilters = imagePaths.map((_, i) => {
-            const isZoomIn = Math.random() < 0.5;
-            // ✅ Fix: Randomize zoom level for more variety to comply with YouTube policies
-            const zoomAmount = 1.1 + Math.random() * 0.15; // Random zoom between 1.10 and 1.25
-            const startZoom = isZoomIn ? 1.0 : zoomAmount;
-            const endZoom = isZoomIn ? zoomAmount : 1.0;
-            const xPan = ['iw/2-(iw/zoom/2)', '0', 'iw-iw/zoom'][Math.floor(Math.random() * 3)];
-            const yPan = ['ih/2-(ih/zoom/2)', '0', 'ih-ih/zoom'][Math.floor(Math.random() * 3)];
-            // Increase pre-scale to avoid black borders with higher zoom
-            const preScale = 1.3;
-            
-            return `[${i}:v]scale=w=${width}*${preScale}:h=${height}*${preScale}:force_original_aspect_ratio=increase,` +
-                   `crop=w=${width}*${preScale}:h=${height}*${preScale},` +
-                   `zoompan=z='on*(${endZoom}-${startZoom})/(${imgDuration * finalFps})+${startZoom}':` +
-                   `x='${xPan}':y='${yPan}':d=${Math.ceil(imgDuration * finalFps)}:` +
-                   `s=${width}x${height}:fps=${finalFps},setsar=1[v${i}]`;
-        });
-        
-        const concatInput = imagePaths.map((_, i) => `[v${i}]`).join('');
-        const concatFilter = `${concatInput}concat=n=${n}:v=1:a=0[v_no_text]`;
-        
-        let textFilter = '';
-        if (quote) {
-            // --- Randomize Text Style for Variety ---
-            const fonts = ['Arial', 'Verdana', 'Georgia', 'Times New Roman'];
-            const selectedFont = fonts[Math.floor(Math.random() * fonts.length)];
-            const fontPath = process.platform === 'win32'
-                ? `C\\\\:/Windows/Fonts/${selectedFont}.ttf`
-                : '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'; // Fallback for non-windows
-
-            const fontSize = Math.floor(Math.random() * 16) + 40; // Random size between 40 and 55
-            
-            // Randomize vertical position: 15% from top, middle, or 15% from bottom
-            const yPositions = [`(h*0.15)`, `(h/2-text_h/2)`, `(h-text_h-h*0.15)`];
-            const yPos = yPositions[Math.floor(Math.random() * yPositions.length)];
-
-            const escapedQuote = quote.replace(/'/g, `\\\\\\'`).replace(/:/g, `\\\\:`);
-
-            // Use a shadow instead of a box for a cleaner, more modern look
-            textFilter = `[v_no_text]drawtext=fontfile='${fontPath}':text='${escapedQuote}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}:shadowcolor=black@0.6:shadowx=2:shadowy=2[v_with_text]`;
-        }
-
-        const allImageFilters = [...effectFilters, concatFilter];
-        if (textFilter) allImageFilters.push(textFilter);
-
-        const finalVideoMap = textFilter ? '[v_with_text]' : '[v_no_text]';
-
-        let filterComplex;
-        let outputMaps;
-        
-        // --- Audio Processing ---
-        const musicInput = `[${n}:a]`;
-        const speechInput = speechAudioPath ? `[${n+1}:a]` : null;
-
-        if (!isShorts) {
-            let audioChain;
-            if (speechInput) {
-                // With speech: split the speech stream. Use one copy for sidechain control and the other for the final mix.
-                // This prevents the "stream consumed" error in FFmpeg.
-                audioChain = `${speechInput}asplit[sc][sm]; ${musicInput}[sc]sidechaincompress=threshold=0.1:ratio=10[ducked_music]; [ducked_music][sm]amix=inputs=2:duration=longest[mixed_audio]`;
-            } else {
-                // Without speech: just use the music
-                audioChain = `${musicInput}acopy[mixed_audio]`;
-            }
-            
-            // Apply fade in/out to the final mixed audio
-            const fadeDuration = 1.5;
-            const fadeStartTime = duration > fadeDuration ? duration - fadeDuration : 0;
-            const audioFilter = `${audioChain}; [mixed_audio]afade=t=in:st=0:d=${fadeDuration},afade=t=out:st=${fadeStartTime}:d=${fadeDuration}[outa]`;
-            
-            filterComplex = [...allImageFilters, audioFilter].join(';');
-            outputMaps = [`-map ${finalVideoMap}`, '-map [outa]'];
-        
-        } else { // For Shorts
-            filterComplex = allImageFilters.join(';');
-            // For shorts, just map the main music audio. If speech is desired, a more complex mix would be needed.
-            outputMaps = [`-map ${finalVideoMap}`, `-map ${n}:a`];
-        }
-
-        ff.complexFilter(filterComplex)
-          .outputOptions([
-              ...outputMaps,
-              '-c:v libx264',
-              '-preset veryfast',
-              '-crf 23',
-              '-pix_fmt yuv420p',
-              '-c:a aac',
-              '-b:a 192k',
-              '-shortest'
-          ])
-          .on('start', cmd => console.log('FFmpeg Render Start with AI Content'))
-          .on('end', () => resolve(outPath))
-          .on('error', (err, stdout, stderr) => {
-              console.error('Cannot process video: ' + err.message);
-              console.error('ffmpeg stderr:\n' + stderr);
-              reject(new Error('FFmpeg failed during render. Check logs.'));
-          })
-          .save(outPath);
-    });
-}
-
-// Base video ကို တစ်နာရီကျော်ကြာအောင် ချောမွေ့စွာ loop ပြုလုပ်သည်
-async function loopToOneHour(baseVideoPath, finalName) {
-    const outPath = path.join(__dirname, 'output', `${finalName}_long.mp4`);
-    const targetDuration = 3600 + Math.floor(Math.random() * 120);
-
-    return new Promise((resolve, reject) => {
-        ffmpeg(baseVideoPath)
-            .inputOptions(['-stream_loop -1']) // Target duration ပြည့်အောင် loop ပတ်မည်
-            .outputOptions([
-                '-c:v libx264',
-                '-preset ultrafast',
-                '-c:a aac',
-                `-t ${targetDuration}`,
-                '-pix_fmt yuv420p'
-            ])
-            .on('end', () => resolve(outPath))
-            .on('error', (err, stdout, stderr) => {
-                console.error('Cannot loop video: ' + err.message);
-                console.error('ffmpeg stderr:\n' + stderr);
-                reject(new Error('FFmpeg failed during loop. Check logs.'));
-            })
-            .save(outPath);
-    });
-}
-
-async function uploadVideo(filePath, thumbPath, title, description, tags, isShorts = false) {
-    const snippet = {
-        title: isShorts ? `${title} #shorts #meditation` : `${title} | Relaxing Music`,
-        description: description,
-        tags: tags,
-        categoryId: '10', // Music category
-        defaultLanguage: 'en',
-        defaultAudioLanguage: 'en'
-    };
-
-    const res = await youtube.videos.insert({
-        part: 'snippet,status',
-        requestBody: {
-            snippet: {
-                title: snippet.title,
-                description: snippet.description,
-                tags: snippet.tags,
-                categoryId: snippet.categoryId,
-                defaultLanguage: snippet.defaultLanguage,
-                defaultAudioLanguage: snippet.defaultAudioLanguage
-            },
-            status: { privacyStatus: 'public' }
-        },
-        media: { body: fs.createReadStream(filePath) }
-    });
-
-    if (!isShorts && thumbPath) {
-        try {
-            await youtube.thumbnails.set({
-                videoId: res.data.id,
-                media: { body: fs.createReadStream(thumbPath) }
-            });
-        } catch (thumbError) {
-            console.warn(`⚠️  Thumbnail upload failed for video ID ${res.data.id}: ${thumbError.message}`);
-            console.warn("This is likely a YouTube rate limit. The video is uploaded, but you may need to set the thumbnail manually.");
-            // Don't re-throw the error, just warn the user and continue.
-        }
-    }
-    return res.data;
-}
+// Render and Upload logic moved to src/ modules
 
 
 async function createCanvasThumb(imagePath, title) {
@@ -465,7 +190,7 @@ async function processQueue() {
 
     try {
         // 1. AI content generate လုပ်ခြင်း
-        const { youtubeTitle, youtubeDescription, youtubeTags, inspirationalQuote, imageKeywords, guidedMeditationScript } = await generateAiContent(originalTitle);
+        const { youtubeTitle, youtubeDescription, youtubeTags, inspirationalQuote, imageKeywords, guidedMeditationScript } = await generateAiContent(genAI, originalTitle, CHANNEL_NAME);
 
         // 2. AI keywords ဖြင့် image များ ရှာဖွေ ဒေါင်းလုဒ်လုပ်ခြင်း
         const imagePaths = await searchAndDownloadImages(imageKeywords);
@@ -475,16 +200,9 @@ async function processQueue() {
         let speechAudioPath = null;
         if (guidedMeditationScript) {
             try {
-                console.log("Generating guided meditation audio...");
-                const speechUrl = googleTTS.getAudioUrl(guidedMeditationScript, { lang: 'en', slow: true, host: 'https://translate.google.com' });
+                console.log("Generating guided meditation audio (Long TTS)...");
                 const speechFilePath = path.join(__dirname, 'temp', 'speech.mp3');
-                const writer = fs.createWriteStream(speechFilePath);
-                const response = await axios({ url: speechUrl, responseType: 'stream' });
-                response.data.pipe(writer);
-                await new Promise((resolve, reject) => {
-                    writer.on('finish', resolve);
-                    writer.on('error', reject);
-                });
+                await generateLongTTS(guidedMeditationScript, speechFilePath);
                 speechAudioPath = speechFilePath;
                 console.log("Guided meditation audio generated successfully.");
             } catch (e) {
@@ -497,7 +215,7 @@ async function processQueue() {
         const thumbPath = await createCanvasThumb(imagePaths[0], youtubeTitle);
         const baseLong = await renderSlideshow(audioPath, speechAudioPath, imagePaths, inspirationalQuote, false);
         const finalLong = await loopToOneHour(baseLong, youtubeTitle);
-        const longVideoData = await uploadVideo(finalLong, thumbPath, youtubeTitle, youtubeDescription, youtubeTags, false);
+        const longVideoData = await uploadToYouTube(youtube, finalLong, thumbPath, youtubeTitle, youtubeDescription, youtubeTags, false);
         const longUrl = `https://youtu.be/${longVideoData.id}`;
 
         // --- Shorts Video ---
@@ -506,7 +224,7 @@ async function processQueue() {
         const shortsTags = ['shorts', 'meditation', 'relaxing music', ...youtubeTags.slice(0, 5)];
         // Shorts အတွက် ပုံတစ်ပုံနှင့် quote ကိုသုံးပါ (စကားပြောမပါ)
         const finalShorts = await renderSlideshow(audioPath, null, [imagePaths[0]], inspirationalQuote, true);
-        const shortsVideoData = await uploadVideo(finalShorts, null, youtubeTitle, shortsDesc, shortsTags, true);
+        const shortsVideoData = await uploadToYouTube(youtube, finalShorts, null, youtubeTitle, shortsDesc, shortsTags, true);
         const shortsUrl = `https://youtu.be/${shortsVideoData.id}`;
 
         await bot.telegram.sendMessage(ADMIN_ID,

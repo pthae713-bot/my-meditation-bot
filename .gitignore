@@ -1,0 +1,10 @@
+node_modules/
+.env
+token.json
+credentials.json
+output/
+images/
+temp/
+songs/*.mp3
+!songs/processed/
+last_update_id.txt
